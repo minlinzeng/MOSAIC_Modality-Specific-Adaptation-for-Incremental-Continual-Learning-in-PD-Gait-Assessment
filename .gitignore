@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Virtual environments
+jbhi_venv/
+.venv/
+venv/
+env/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+
+# Experiment outputs
+**/log/
+**/logs/
+**/checkpoints/
+**/experiment_logs/
+logs_fbg_ablations/
+*.out
+*.log
+master_*.log
+log_*.out
+nohup.out
+
+# MedCoSS pretrained weights (regenerate locally)
+model/weargait/ewc/medcoss/log/
+
+# Data (keep README if added)
+data/*
+!data/README.md
+
+# W&B / notebooks
+wandb/
+.ipynb_checkpoints/
+
+# Large model artifacts (under ignored log/checkpoint dirs)
+*.pth
+*.pt
+*.ckpt

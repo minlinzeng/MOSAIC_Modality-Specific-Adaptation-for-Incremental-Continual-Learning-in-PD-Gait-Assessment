@@ -1,0 +1,24 @@
+# Core ML
+torch>=2.0,<3
+torchvision>=0.15
+numpy>=1.24,<2
+scipy>=1.10
+pandas>=2.0
+scikit-learn>=1.3
+
+# Optimal transport & convex solvers (LwI baseline)
+POT>=0.9
+cvxpy>=1.4
+
+# Data I/O
+openpyxl>=3.1
+xlrd>=2.0
+c3d>=0.5
+PyYAML>=6.0
+
+# Visualization & progress
+matplotlib>=3.7
+tqdm>=4.65
+
+# Install PyTorch with CUDA separately if needed, e.g.:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
