@@ -9,7 +9,7 @@ import torch.optim as optim
 from sklearn.metrics import f1_score
 from sklearn.model_selection import KFold
 
-# 核心解耦资产引入
+# Core decoupled imports
 from data_loader import get_fbg_dataloaders
 from encoder import MICL_CNN_PD_Model
 from fbg_utility import (
@@ -20,14 +20,14 @@ from fbg_utility import (
     set_deterministic_seed,
     compute_fisher_information, 
     compute_ewc_loss,
-    set_active_task_and_freeze_fbg  # 🌟 引入物理隔离锁
+    set_active_task_and_freeze_fbg  # MSBN gradient lock
 )
 
 # =====================================================================
-# 🌟 CL 终极版：适配 MixUp 的参数路由表 (彻底关闭双重平滑)
+# CL config: MixUp routing (no label smoothing)
 # =====================================================================
 MODALITY_CONFIG = {
-    # 彻底关闭 label_smoothing, 交由 MixUp 处理；延长耐心以穿越复杂流形
+    # No label_smoothing (MixUp handles soft labels); longer patience
     "linear":  {"lr": 1e-4, "weight_decay": 0.05, "dropout": 0.3, "label_smoothing": 0.0, "patience": 15},
     "angular": {"lr": 1e-4, "weight_decay": 0.05, "dropout": 0.3, "label_smoothing": 0.0, "patience": 15}, 
     "grf":     {"lr": 2e-4, "weight_decay": 0.05, "dropout": 0.1, "label_smoothing": 0.0, "patience": 20}   
@@ -35,7 +35,7 @@ MODALITY_CONFIG = {
 
 def train_cl_epoch(model, teacher_model, dataloader, criterion, optimizer, device, 
                    active_mod, prev_mod, task_idx, ewc_memories, alpha_rep, args):
-    # 物理锁定机制启动
+    # Physical lock mechanism
     model.train()
     if not args.disable_msbn:
         set_active_task_and_freeze_fbg(model, task_idx)
@@ -56,7 +56,7 @@ def train_cl_epoch(model, teacher_model, dataloader, criterion, optimizer, devic
         
         optimizer.zero_grad()
         
-        # 🌟 修复 1：重新植入受试者流形 MixUp
+        # Subject-level MixUp
         alpha_mix = 0.3
         lam = np.random.beta(alpha_mix, alpha_mix)
         batch_size = labels.size(0)
@@ -69,14 +69,14 @@ def train_cl_epoch(model, teacher_model, dataloader, criterion, optimizer, devic
         
         logits_s, feat_s = model(x_lin=mix_lin, x_ang=mix_ang, x_grf=mix_grf, current_task=task_idx)
         
-        # 交叉熵损失 (MixUp 版本)
+        # Cross-entropy (MixUp)
         loss_ce = lam * criterion(logits_s, labels_a) + (1 - lam) * criterion(logits_s, labels_b)
         loss = loss_ce
         total_ce += loss_ce.item()
         
         if task_idx > 0 and teacher_model is not None:
             with torch.no_grad():
-                # 🌟 修复 2：教师模型必须接收 MixUp 后的同态数据，以约束插值流形
+                # Teacher sees same MixUp batch for manifold consistency
                 prev_mix_lin = lam * lin + (1 - lam) * lin[index] if prev_mod == 'linear' else None
                 prev_mix_ang = lam * ang + (1 - lam) * ang[index] if prev_mod == 'angular' else None
                 prev_mix_grf = lam * grf + (1 - lam) * grf[index] if prev_mod == 'grf' else None
@@ -87,13 +87,13 @@ def train_cl_epoch(model, teacher_model, dataloader, criterion, optimizer, devic
                 raw_kd = compute_kd_loss(logits_s, logits_t, tau=args.kd_tau)
                 weighted_kd = args.lambda_kd * raw_kd
                 loss += weighted_kd
-                total_kd += weighted_kd.item()  # 记录砸向梯度的真实力量
+                total_kd += weighted_kd.item()  # logged KD contribution
             
             if alpha_rep > 0:
                 raw_rep = compute_repulsive_loss(feat_s, feat_t, margin=args.repulsive_margin)
                 weighted_rep = alpha_rep * raw_rep
                 loss += weighted_rep
-                total_rep += weighted_rep.item() # 记录砸向梯度的真实力量
+                total_rep += weighted_rep.item()  # logged repulsive contribution
             
             if args.lambda_ewc > 0:
                 weighted_ewc = compute_ewc_loss(model, ewc_memories, lambda_ewc=args.lambda_ewc)
@@ -106,7 +106,7 @@ def train_cl_epoch(model, teacher_model, dataloader, criterion, optimizer, devic
         
         total_loss += loss.item()
         preds = torch.argmax(logits_s, dim=1)
-        # 仅为指标监控映射回硬标签
+        # Hard labels for metric logging only
         actual_labels = labels_a if lam > 0.5 else labels_b
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(actual_labels.cpu().numpy())
@@ -163,10 +163,10 @@ def main():
     parser.add_argument('--p_degree', type=float, default=5.0)
     parser.add_argument('--disable_curriculum', action='store_true')
     parser.add_argument('--save_dir', type=str, default="./checkpoints")
-    parser.add_argument('--window_size', type=int, default=256, help="修改窗口大小")
-    parser.add_argument('--step_size', type=int, default=64, help="建议设置为 window_size 的 50% 或 25%")
+    parser.add_argument('--window_size', type=int, default=256, help="Sliding window length")
+    parser.add_argument('--step_size', type=int, default=64, help="Stride; often 50% or 25% of window_size")
     parser.add_argument('--d_model', type=int, default=64)
-    parser.add_argument('--disable_msbn', action='store_true', help="关闭MSBN，降级为Shared BN基线")
+    parser.add_argument('--disable_msbn', action='store_true', help="Disable MSBN; use shared BN baseline")
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -201,7 +201,7 @@ def main():
             config = MODALITY_CONFIG[active_mod]
             prev_mod = tasks[task_idx-1] if task_idx > 0 else None
             
-            # 1. 动态实例化模型与梯度继承管理
+            # 1. Model init and gradient inheritance
             if task_idx == 0:
                 model = MICL_CNN_PD_Model(d_model=args.d_model, dropout=config["dropout"], 
                                           num_tasks=num_tasks, disable_msbn=args.disable_msbn).to(device)
@@ -212,21 +212,21 @@ def main():
                 model.res2.drop1d.p = config["dropout"]
                 model.res3.drop1d.p = config["dropout"]
             
-            # 2. 严格的物理隔离：首先绝对锁定不需要的前端编码器的梯度
-            # 这一步是 WearGait 隐藏的必修课：进入当前任务，必须冻结其他模态的特异前端！
+            # 2. Freeze non-active modality encoders
+            # Freeze other modality front-ends for current task
             if hasattr(model, 'enc_lin'): model.enc_lin.requires_grad_(active_mod == 'linear')
             if hasattr(model, 'enc_ang'): model.enc_ang.requires_grad_(active_mod == 'angular')
             if hasattr(model, 'enc_grf'): model.enc_grf.requires_grad_(active_mod == 'grf')
             
-            # 3. 激活当前任务特异性的 MSBN 分支，并强制将历史 MSBN 锁死
+            # 3. Activate current MSBN; lock historical MSBN
             if not args.disable_msbn:
                 set_active_task_and_freeze_fbg(model, task_idx)
                 
-            # 4. 🌟 终极对齐修复：严格重置优化器 (Strict Optimizer Reset)
-            # 过滤出当前真正允许求梯度的参数，彻底斩断跨任务二阶矩爆炸的步长隐患
+            # 4. Strict optimizer reset
+            # Optimizer only on parameters with requires_grad=True
             active_params = list(filter(lambda p: p.requires_grad, model.parameters()))
             actual_wd = 0.0 if (task_idx > 0 and args.lambda_ewc > 0) else config["weight_decay"]
-            optimizer = optim.AdamW(active_params, lr=config["lr"], weight_decay=actual_wd) # <--- 传入净化后的 active_params
+            optimizer = optim.AdamW(active_params, lr=config["lr"], weight_decay=actual_wd)  # active_params only
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
             criterion = nn.CrossEntropyLoss(label_smoothing=config["label_smoothing"])
             early_stopper = EarlyStopping(patience=15, min_delta=1e-4)
@@ -240,23 +240,23 @@ def main():
                 for param in model.parameters():
                     param.requires_grad = False
                     
-                # 2. 仅解冻当前模态的前端卷积核
+                # 2. Unfreeze current modality encoder only
                 current_encoder = getattr(model, f"enc_{active_mod[:3]}")
                 for param in current_encoder.parameters():
                     param.requires_grad = True
                 
-                # 3. 核心修正：依靠你底层的 set_active_task_and_freeze_fbg 
-                # 此时只有 task_idx 对应的 BN 的 requires_grad 被设为了 True
+                # 3. MSBN routing via set_active_task_and_freeze_fbg
+                # Only current task BN has requires_grad=True
                 if not args.disable_msbn:
                     set_active_task_and_freeze_fbg(model, task_idx)
                 
-                # 4. 使用单独的优化器，仅对前端进行轻量级预热
+                # 4. Separate optimizer for encoder warmup
                 warmup_opt = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3)
                 warmup_criterion = nn.CrossEntropyLoss(label_smoothing=config["label_smoothing"])
                 
                 for w_ep in range(args.warmup_epochs):
-                    # 每次迭代前，强制唤醒当前任务的 MSBN 进入 train 模式以累积 running_mean/var
-                    # 同时保证历史任务的 BN 绝对死锁在 eval 状态
+                    # Current MSBN in train mode for running stats
+                    # Historical BN locked in eval
                     model.train()
                     for m in model.modules():
                         if isinstance(m, nn.BatchNorm1d):
@@ -281,20 +281,20 @@ def main():
                 teacher_model = copy.deepcopy(model).eval()
                 for param in teacher_model.parameters():
                     param.requires_grad = False
-                # 5. 恢复 CL 阶段应当被训练的参数梯度
+                # 5. Restore CL-stage parameter gradients
                 for param in model.parameters():
                     param.requires_grad = True
                     
-                # 重新冻结其他模态的前端
+                # Re-freeze other modality encoders
                 if hasattr(model, 'enc_lin'): model.enc_lin.requires_grad_(active_mod == 'linear')
                 if hasattr(model, 'enc_ang'): model.enc_ang.requires_grad_(active_mod == 'angular')
                 if hasattr(model, 'enc_grf'): model.enc_grf.requires_grad_(active_mod == 'grf')
 
-            # 5. 任务级训练循环
+            # 5. Per-task training loop
             for ep in range(1, args.epochs + 1):
                 if args.disable_curriculum:
                     alpha_rep = args.alpha_max
-                    current_kd_lambda = args.lambda_kd # 保持传入的 base 值绝对恒定
+                    current_kd_lambda = args.lambda_kd  # fixed base KD weight
                 else:
                     alpha_rep, current_kd_lambda = curriculum.get_weights(ep)
                 args.lambda_kd = current_kd_lambda 
@@ -307,7 +307,7 @@ def main():
                 
                 stop_signal = early_stopper(val_f1, model)
                 
-                # 动态课程早停锁
+                # Curriculum-aware early stopping
                 lockout_horizon = int((0.5 ** (1.0 / args.p_degree)) * args.epochs)
                 curriculum_active = (task_idx > 0) and (ep <= lockout_horizon) and (args.alpha_max > 0.0)
                 
@@ -327,17 +327,17 @@ def main():
                     
             model.load_state_dict(early_stopper.best_model_state)
             
-            # 保存各 Fold 阶段最优权重
+            # Save best weights per fold
             ckpt_path = os.path.join(args.save_dir, f"fbg_fold{fold+1}_task{task_idx}_{active_mod}.pth")
             torch.save(model.state_dict(), ckpt_path)
             
-            # 计算全量 Fisher 并安全迁移到 CPU 内存
+            # Fisher on CPU
             fisher_matrix = compute_fisher_information(model, train_loader, device, active_mod, task_idx)
             opt_params = {name: param.detach().cpu().clone() for name, param in model.named_parameters()}
             fisher_matrix = {name: f.cpu() for name, f in fisher_matrix.items()}
             ewc_memories[task_idx] = {'fisher': fisher_matrix, 'opt_params': opt_params}
             
-            # 严格计算增量评估状态矩阵 R
+            # Incremental R matrix eval
             for j in range(task_idx + 1):
                 eval_mod = tasks[j]
                 f1_score_j = evaluate_cl(model, test_loader, device, eval_mod, j)

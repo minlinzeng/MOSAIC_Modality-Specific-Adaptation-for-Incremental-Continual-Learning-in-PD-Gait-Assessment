@@ -130,7 +130,7 @@ def train_one_task(args, model, ewc, train_loader, val_loaders_dict, tasks_list,
     U.set_active_task_and_freeze(model, task_id)
 
     # -----------------------------------------------------------------
-    # ⮑ 双重稳定锁 (Stabilizer Locks): 阻断向零点侵蚀与决策边界梯度噪声
+    # ⮑ Stabilizer locks: limit zero drift and boundary noise
     # -----------------------------------------------------------------
     if task_id > 0:
         for param_group in ewc.optimizer.param_groups: 
@@ -139,7 +139,7 @@ def train_one_task(args, model, ewc, train_loader, val_loaders_dict, tasks_list,
             if isinstance(m, (nn.Dropout1d, nn.Dropout)): 
                 m.p = 0.0  
 
-    # 🚨 核心修正 1：LossEngine 内部严格接收 z 并在深层隐空间进行余弦正交隔离
+    # 🚨 Fix 1: repulsive loss on deep features z
     loss_engine = U.LossEngine(ewc, aligned_teacher, args, device)
     base_rep_alpha, base_kd_lambda, min_kd_lambda = getattr(args, 'repulsive_alpha', 0.0), getattr(args, 'kd_lambda', 0.0), getattr(args, 'min_kd_lambda', 0.1)
     
@@ -156,7 +156,7 @@ def train_one_task(args, model, ewc, train_loader, val_loaders_dict, tasks_list,
         t = ep / epochs 
         
         # -------------------------------------------------------------
-        # ⮑ 课程调度器 (Curriculum Scheduler)
+        # ⮑ Curriculum scheduler
         # -------------------------------------------------------------
         if task_id > 0:
             if base_rep_alpha > 0.0 and not getattr(args, 'disable_curriculum', False):
@@ -183,7 +183,7 @@ def train_one_task(args, model, ewc, train_loader, val_loaders_dict, tasks_list,
             z = model.shared_backbone(features)
             logits = model.shared_head(z)
             
-            # 此处严格传入深层潜在表征 z 进行计算
+            # Apply on deep latent z
             loss, metrics = loss_engine.compute(logits, z, y, x, mod)
             
             loss.backward()
@@ -226,7 +226,7 @@ def train_one_task(args, model, ewc, train_loader, val_loaders_dict, tasks_list,
             
         stop_signal = early_stopper(current_val_f1, model)
         
-        # 🚨 核心修正 2：自适应的 50% 能量期曲线动态锁定
+        # 🚨 Fix 2: adaptive 50% early-stop protection
         lockout_horizon = int(0.5 * epochs) if (getattr(args, 'disable_curriculum', False) or base_rep_alpha == 0.0) else int((0.5 ** (1.0 / args.p_degree)) * epochs)
         curriculum_active = (task_id > 0) and (ep <= lockout_horizon) and (getattr(args, 'kd_lambda', 0.0) > 0) and (base_rep_alpha > 0.0)
         
@@ -280,8 +280,8 @@ def run_cv_with_cache(args, data_cache):
                 ewc = ElasticWeightConsolidation(model, nn.CrossEntropyLoss(), lr=args.lr, weight=0.0, weight_decay=current_decay)
             elif args.mode == 'cl':
                 # -----------------------------------------------------------------
-                # ⮑ 强制清空优化器动量 (Strict Optimizer Reset)
-                # 彻底斩断跨任务二阶矩爆炸导致的步长灾难，强迫启动 Adam 第一步偏差校正
+                # ⮑ Reset optimizer state between tasks
+                # Clear Adam momentum across tasks
                 # -----------------------------------------------------------------
                 active_params = list(filter(lambda p: p.requires_grad, model.parameters()))
                 ewc.optimizer = torch.optim.Adam(active_params, lr=args.lr, weight_decay=current_decay)
@@ -296,7 +296,7 @@ def run_cv_with_cache(args, data_cache):
                 print(f">> [CL] Registering Fisher for {mod} (Required for Overlap Analysis)...")
                 U.register_shared_ewc(model, ewc, tr_loader, args.fisher_batches, task_id=current_task_idx)
 
-            # 🚨 核心修正 3：动态嵌套循环，拉满抽取所有历史任务与当前任务的 Fisher 相似度
+            # Fix 3: nested loop over all past/current tasks for Fisher cosine similarity
             if getattr(args, 'analyze_overlap', False) and ti >= 2:
                 for past_task in range(current_task_idx):
                     U.analyze_fisher_cosine_similarity(ewc, task_A=past_task, task_B=current_task_idx)

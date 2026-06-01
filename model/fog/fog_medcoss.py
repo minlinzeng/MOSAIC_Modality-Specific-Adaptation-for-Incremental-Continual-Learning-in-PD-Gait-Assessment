@@ -11,7 +11,7 @@ from sklearn.metrics import f1_score
 from sklearn.cluster import KMeans
 from torch.utils.data import DataLoader, Sampler
 
-# 引入你的 CNN 基座与数据流水线
+# CNN backbone and data pipeline imports
 from encoder import WearGaitUniversal
 from data_loader import preload_all_subjects, prepare_split, make_sync_loaders, build_subj2label_fog, make_stratified_folds
 from utility import set_seed
@@ -19,7 +19,7 @@ from medcoss_core import FOG_Buffer_Dataset
 from model.paths import FOG_CACHE, as_str
 
 class ModalityBatchSampler(Sampler):
-    """连续学习专属的异构数据采样器，隔离不同模态保证张量堆叠安全"""
+    """CL heterogeneous batch sampler; isolates modalities for safe stacking"""
     def __init__(self, dataset, batch_size, shuffle=True):
         self.dataset = dataset
         self.batch_size = batch_size
@@ -64,9 +64,9 @@ def extract_kmeans_buffer(model, native_dataset, mod_order, device, current_mod,
     
     with torch.no_grad(), torch.amp.autocast('cuda'):
         for idx_batch, batch in enumerate(temp_loader):
-            # FOG_Buffer_Dataset 输出 [B, 120, C]，CNN 需要 [B, C, 120]
+            # Buffer [B,T,C] -> CNN [B,C,T]
             x = batch['data'].transpose(1, 2).to(device)
-            # 提取中间层隐变量作为 K-Means 特征
+            # K-means on intermediate features
             features = model.shared_backbone(model.encoders[current_mod](x))
             all_features.append(features.cpu().numpy())
             
@@ -98,7 +98,7 @@ def extract_kmeans_buffer(model, native_dataset, mod_order, device, current_mod,
 
 
 def evaluate_direct(model, eval_dataset, eval_mod, device, args):
-    """直接端到端评估（放弃线性探测）"""
+    """End-to-end eval (no linear probe)"""
     model.eval()
     model.set_active_modality(eval_mod)
     loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False)
@@ -118,7 +118,7 @@ def evaluate_direct(model, eval_dataset, eval_mod, device, args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root', type=str, default=as_str(FOG_CACHE))
-    parser.add_argument('--order', type=str, default="skeleton,gyr,acc") # 强制使用最科学的流形顺序
+    parser.add_argument('--order', type=str, default="skeleton,gyr,acc") # default modality order
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--n_folds', type=int, default=5)
     parser.add_argument('--batch_size', type=int, default=32)
@@ -150,7 +150,7 @@ def main():
     for fold, (train_subs, test_subs) in enumerate(folds):
         print(f"\n{'='*70}\n 🌟 CNN-MEDCOSS FOLD {fold+1}/{args.n_folds} \n{'='*70}")
         
-        # 🚨 公平性限制：强制禁用 DBN (MedCoSS 并没有提出域泛化路由机制)
+        # 🚨 Fairness: disable DBN (MedCoSS has no domain routing)
         student = WearGaitUniversal(num_classes=3, disable_dbn=True).to(device)
         teacher = None
         seen_tasks = []
@@ -198,7 +198,7 @@ def main():
                         loss_ce = criterion(logits, y)
                         loss_kd = 0.0
                         
-                        # 🌟 MedCoSS 核心：历史任务特征蒸馏
+                        # 🌟 MedCoSS: historical feature distillation
                         if is_past and teacher is not None:
                             teacher.set_active_modality(mod_str)
                             with torch.no_grad():
@@ -253,14 +253,14 @@ if __name__ == "__main__":
     main()
 
 
-# 1. 确保日志目录存在
+# 1. Ensure log directory exists
 # mkdir -p ./log/fog_baselines/medcoss/
 
-# # 2. 在 GPU 0 上瞬间拉起 5 个并发进程
+# # 2. Launch 5 concurrent jobs on GPU 0
 # for s in 42 43 44 2 3; do
-#     echo "🚀 点火: CNN-MedCoSS | Seed $s | GPU 0"
+#     echo "Launch CNN-MedCoSS | Seed $s | GPU 0"
 #     CUDA_VISIBLE_DEVICES=0 nohup python -u fog_medcoss.py --seed $s > ./log/fog_baselines/medcoss/seed_${s}.log 2>&1 &
     
-#     # 缓冲 5 秒，防止 5 个进程瞬间同时读取大量 PKL 文件造成系统 I/O 瘫痪
+#     # 5s stagger to avoid PKL I/O thrashing
 #     sleep 0.5
 # done

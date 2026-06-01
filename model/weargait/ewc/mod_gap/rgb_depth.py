@@ -12,19 +12,19 @@ def main():
     print(f"🚀 Using device: {device}")
 
     # ==========================================
-    # 1. 加载模型 (ResNet50 用于提取特征, MiDaS 用于生成深度图)
+    # 1. Load ResNet50 (features) and MiDaS (depth)
     # ==========================================
     print("\n📦 Loading ResNet50 and MiDaS (Depth Estimator)...")
     
-    # 我们用同一个 ResNet50 来分别提取 RGB 和 Depth 的特征 (这是 RGB-D 的常规操作)
+    # Same ResNet50 for RGB and depth features (standard RGB-D pipeline)
     resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1).to(device).eval()
     resnet.fc = torch.nn.Identity()
     
-    # 加载 MiDaS 深度预测模型
+    # MiDaS depth model
     midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", trust_repo=True).to(device).eval()
     midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True).small_transform
 
-    # 提取特征用的标准预处理
+    # ImageNet normalization for feature extraction
     transform_feature = T.Compose([
         T.Resize((224, 224)),
         T.ToTensor(),
@@ -32,7 +32,7 @@ def main():
     ])
 
     # ==========================================
-    # 2. 准备数据
+    # 2. Prepare data
     # ==========================================
     video_files = []
     root_dir = "/home/minlin/ucf101_raw/UCF101_subset" 
@@ -52,22 +52,22 @@ def main():
     valid_count = 0
 
     # ==========================================
-    # 3. 提取 RGB 和 Depth 特征
+    # 3. Extract RGB and depth features
     # ==========================================
     for v_path in video_files:
         if valid_count >= 50: break
         
-        clip = None # 初始化
+        clip = None
         try:
             clip = VideoFileClip(v_path)
-            frame = clip.get_frame(clip.duration / 2) # 取中间帧 (numpy array)
+            frame = clip.get_frame(clip.duration / 2)  # middle frame
             img_pil = Image.fromarray(frame).convert('RGB')
             
-            # --- 处理 RGB ---
+            # --- RGB ---
             img_tensor = transform_feature(img_pil).unsqueeze(0).to(device)
             
-            # --- 处理 Depth ---
-            # 1. 用 MiDaS 预测深度
+            # --- Depth ---
+            # 1. MiDaS depth prediction
             input_batch = midas_transforms(frame).to(device)
             with torch.no_grad():
                 prediction = midas(input_batch)
@@ -78,18 +78,18 @@ def main():
                     align_corners=False,
                 ).squeeze()
             
-            # 2. 将深度图归一化到 0-255 并转为 3 通道 (伪装成普通图片给 ResNet 吃)
+            # 2. Normalize depth to 0-255, replicate to 3 channels for ResNet
             depth_map = prediction.cpu().numpy()
             depth_min, depth_max = depth_map.min(), depth_map.max()
             depth_map = 255.0 * (depth_map - depth_min) / (depth_max - depth_min)
             depth_map = depth_map.astype(np.uint8)
             
-            # 复制成 3 通道
+            # Stack to 3 channels
             depth_3c = np.stack((depth_map,)*3, axis=-1)
             depth_pil = Image.fromarray(depth_3c)
             depth_tensor = transform_feature(depth_pil).unsqueeze(0).to(device)
 
-            # --- 提取特征 ---
+            # --- Feature extraction ---
             with torch.no_grad():
                 f_rgb = resnet(img_tensor).cpu()
                 f_depth = resnet(depth_tensor).cpu()
@@ -104,12 +104,12 @@ def main():
             continue
             
         finally:
-            # 👑 修复：无论成功还是报错，绝对保证释放视频资源
+            # Always release video handle
             if clip is not None:
                 clip.close()
 
     # ==========================================
-    # 4. 计算结果
+    # 4. Aggregate metrics
     # ==========================================
     if valid_count > 0:
         all_rgb = torch.cat(rgb_features)      # (50, 2048)
@@ -117,7 +117,7 @@ def main():
         
         gaps, ratios = [], []
         
-        # 👑 修复：统一降维到 64 维！与临床传感器保持绝对公平的比较基准。
+        # Project to 64-dim for fair comparison with clinical sensors
         fair_target_dim = 64 
         
         for _ in range(10):

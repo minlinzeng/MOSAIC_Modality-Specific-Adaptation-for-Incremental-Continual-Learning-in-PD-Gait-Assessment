@@ -10,10 +10,10 @@ from sklearn.metrics import f1_score
 from sklearn.model_selection import KFold
 
 from data_loader import get_fbg_dataloaders
-from encoder import MICL_CNN_PD_Model  # 确保这里调用的是带有 stride=2 的重构版模型
+from encoder import MICL_CNN_PD_Model  # stride=2 encoder
 
 # =====================================================================
-# 🌟 方案 C：非对称参数重构与收敛耐心控制
+# Asymmetric hyperparams and patience
 # =====================================================================
 MODALITY_CONFIG = {
     "linear":  {"lr": 1e-4, "weight_decay": 0.05, "dropout": 0.3, "label_smoothing": 0.1, "patience": 12},
@@ -27,7 +27,7 @@ def parse_args():
     parser.add_argument('--order', type=str, default="linear,angular,grf")
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--epochs', type=int, default=70) # 延长上界以兼容大 patience
+    parser.add_argument('--epochs', type=int, default=70)  # high cap for large patience
     parser.add_argument('--d_model', type=int, default=64)
     return parser.parse_args()
 
@@ -78,7 +78,7 @@ def train_specialist_epoch(model, dataloader, criterion, optimizer, device, acti
         lin, ang, grf, labels = route_modality(batch, device, active_mod)
         optimizer.zero_grad()
         
-        # 🌟 方案 A：受试者融合 MixUp
+        # Subject-level MixUp
         alpha = 0.3
         lam = np.random.beta(alpha, alpha)
         batch_size = labels.size(0)
@@ -92,7 +92,7 @@ def train_specialist_epoch(model, dataloader, criterion, optimizer, device, acti
         
         logits, _ = model(x_lin=lin, x_ang=ang, x_grf=grf, current_task=task_idx)
         
-        # MixUp 损失计算
+        # MixUp loss
         loss = lam * criterion(logits, labels_a) + (1 - lam) * criterion(logits, labels_b)
         
         loss.backward()
@@ -102,7 +102,7 @@ def train_specialist_epoch(model, dataloader, criterion, optimizer, device, acti
         total_loss += loss.item() * batch_size
         preds = torch.argmax(logits, dim=1)
         
-        # 仅为指标监控映射回硬标签（统计近似）
+        # Hard labels for metric logging only (approximate stats)
         actual_labels = labels_a if lam > 0.5 else labels_b
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(actual_labels.cpu().numpy())
@@ -126,14 +126,14 @@ def evaluate_specialist(model, dataloader, device, active_mod, task_idx):
 def run_single_fold(args, device, train_loader, test_loader, active_mod, task_idx, fold_idx):
     config = MODALITY_CONFIG[active_mod]
     
-    # 强制移除 num_layers 兼容你的编码器 API
+    # Drop num_layers (not in encoder API)
     model = MICL_CNN_PD_Model(d_model=args.d_model, dropout=config["dropout"]).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
     criterion = nn.CrossEntropyLoss(label_smoothing=config["label_smoothing"])
     
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, min_lr=1e-6)
     
-    # 获取模态特定的早停耐心值
+    # Modality-specific early-stop patience
     early_stopper = EarlyStopping(patience=config["patience"], min_delta=1e-3)
     
     for ep in range(1, args.epochs + 1):
@@ -186,7 +186,7 @@ def main():
             train_subjects = [subjects[i] for i in train_idx]
             test_subjects = [subjects[i] for i in test_idx]
             
-            # 使用修正后的 256 窗口与 64 步长
+            # window 256, stride 64
             train_loader, test_loader = get_fbg_dataloaders(
                 data_root=args.data_root, 
                 train_subjects=train_subjects,  

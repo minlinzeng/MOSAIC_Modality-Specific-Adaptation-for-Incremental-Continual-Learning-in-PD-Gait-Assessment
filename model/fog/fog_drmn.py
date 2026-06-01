@@ -15,7 +15,7 @@ import seaborn as sns
 from sklearn.manifold import TSNE
 
 # ==========================================
-# 🚨 绝对纯净的本地 FOG 导入
+# 🚨 Local FOG-only imports
 # ==========================================
 import utility as U
 from encoder import WearGaitUniversal
@@ -109,7 +109,7 @@ def train_drmn_task(args, model, drmn_manager, train_loader, val_loader, mod, ta
             p.requires_grad = (k == mod) 
             
     active_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(active_params, lr=args.lr, weight_decay=1e-2) # 调整为 FOG 的 WD
+    optimizer = torch.optim.Adam(active_params, lr=args.lr, weight_decay=1e-2) # FOG weight decay
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=20)
     early_stopper = U.EarlyStopping(patience=patience, mode='max')
     criterion = nn.CrossEntropyLoss()

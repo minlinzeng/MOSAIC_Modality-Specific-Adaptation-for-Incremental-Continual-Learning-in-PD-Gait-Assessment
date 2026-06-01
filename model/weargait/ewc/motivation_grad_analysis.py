@@ -22,8 +22,8 @@ from model.weargait.ewc.encoder import WearGaitUniversal
 
 def get_conv_grads(model):
     """
-    🚨 极其严格的梯度剥离：只提取 Shared Backbone 中卷积/线性层的权重梯度
-    通过 p.dim() > 1 完美过滤掉 1D 的 BN 权重和 Bias，直击表征空间冲突。
+    🚨 Extract conv/linear grads from shared backbone only
+    Filter BN/bias (dim==1); measure representation conflict.
     """
     grads = []
     for p in model.shared_backbone.parameters():
@@ -36,7 +36,7 @@ def get_conv_grads(model):
 def run_gradient_conflict_analysis(args, data_cache):
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     
-    # 1. 准备对齐的混合 DataLoader
+    # 1. Mixed-modality DataLoader
     def _scan_subjects(dir_path: Path):
         return sorted({x.name.split("_")[0].lower() for x in dir_path.glob(Config.CSV_PATTERN)})
     pd_ids, hc_ids = _scan_subjects(Config.PD_PATH), _scan_subjects(Config.HC_PATH)
@@ -50,12 +50,12 @@ def run_gradient_conflict_analysis(args, data_cache):
     tr_sync, _ = make_sync_loaders(prep, subj2label, batch_size=args.batch_size, num_workers=args.num_workers)
     train_loader = DataLoader(tr_sync.dataset, batch_size=args.batch_size, shuffle=True)
 
-    # 2. 初始化双轨模型
-    # Model 1: Shared BN (迫使方差坍塌)
+    # 2. Initialize dual models
+    # Model 1: shared BN (variance collapse)
     model_shared = WearGaitUniversal(num_classes=args.num_classes, disable_dbn=True).to(device)
     opt_shared = torch.optim.Adam(model_shared.parameters(), lr=args.lr)
     
-    # Model 2: MSBN (天然物理隔离)
+    # Model 2: MSBN (isolated stats)
     model_msbn = WearGaitUniversal(num_classes=args.num_classes, disable_dbn=False).to(device)
     opt_msbn = torch.optim.Adam(model_msbn.parameters(), lr=args.lr)
 
@@ -66,7 +66,7 @@ def run_gradient_conflict_analysis(args, data_cache):
     print("🚀 [Motivation Analysis] Commencing REAL Gradient Tug-of-War...")
     print("="*60)
 
-    # 3. 核心追踪循环
+    # 3. Main tracking loop
     for ep in range(1, args.epochs + 1):
         model_shared.train()
         model_msbn.train()
@@ -81,22 +81,22 @@ def run_gradient_conflict_analysis(args, data_cache):
             y      = batch["y"].to(device)
             
             # =================================================================
-            # 🔥 [A] Shared BN 组: 观测统计碰撞与梯度拔河
+            # 🔥 [A] Shared BN: stat collision and gradient conflict
             # =================================================================
-            # --- 步骤 A1: 提取被污染的独立梯度 ---
+            # --- Step A1: contaminated per-modality grads ---
             model_shared.zero_grad()
             f_w_s = model_shared.encoders['walkway'](x_walk)
             f_i_s = model_shared.encoders['insole'](x_inso)
             f_m_s = model_shared.encoders['imu'](x_imu)
             
-            # 🚨 在 batch 维度拼接，强迫 Shared BN 计算出灾难性的混合剧毒方差
+            # 🚨 Concat batches -> mixed BN variance
             f_mixed = torch.cat([f_w_s, f_i_s, f_m_s], dim=0)
             z_mixed = model_shared.shared_backbone(f_mixed)
             
-            # 拆回独立模态，此时张量 z_w_s 等已经染上了全局混合方差的毒性
+            # Split modalities after mixed BN contamination
             z_w_s, z_i_s, z_m_s = torch.split(z_mixed, [x_walk.size(0), x_inso.size(0), x_imu.size(0)], dim=0)
 
-            # 独立反传提取梯度 (注意：前两次 retain_graph=True，最后一次默认释放图)
+            # Per-modality backward (retain_graph as needed)
             loss_w_s = criterion(model_shared.shared_head(z_w_s), y)
             loss_w_s.backward(retain_graph=True)
             g_shared_w = get_conv_grads(model_shared)
@@ -108,16 +108,16 @@ def run_gradient_conflict_analysis(args, data_cache):
             model_shared.zero_grad()
             
             loss_m_s = criterion(model_shared.shared_head(z_m_s), y)
-            loss_m_s.backward() # 彻底释放此轮被污染的计算图内存
+            loss_m_s.backward() # Free contaminated graph
             g_shared_m = get_conv_grads(model_shared)
             model_shared.zero_grad()
 
-            # 计算 Shared 组的真实高维冲突 (Cosine Similarity)
+            # Shared-group cosine conflict
             ep_sim_shared['w_i'].append(F.cosine_similarity(g_shared_w.unsqueeze(0), g_shared_i.unsqueeze(0)).item())
             ep_sim_shared['w_m'].append(F.cosine_similarity(g_shared_w.unsqueeze(0), g_shared_m.unsqueeze(0)).item())
             ep_sim_shared['i_m'].append(F.cosine_similarity(g_shared_i.unsqueeze(0), g_shared_m.unsqueeze(0)).item())
             
-            # --- 步骤 A2: 真实联合优化 (One Loss 清爽推进) ---
+            # --- Step A2: single mixed loss step ---
             opt_shared.zero_grad()
             f_w_clean = model_shared.encoders['walkway'](x_walk)
             f_i_clean = model_shared.encoders['insole'](x_inso)
@@ -125,19 +125,19 @@ def run_gradient_conflict_analysis(args, data_cache):
             f_mixed_clean = torch.cat([f_w_clean, f_i_clean, f_m_clean], dim=0)
             
             z_mixed_clean = model_shared.shared_backbone(f_mixed_clean)
-            logits_mixed = model_shared.shared_head(z_mixed_clean) # 形状: [3B, Num_Classes]
+            logits_mixed = model_shared.shared_head(z_mixed_clean) # shape [3B, num_classes]
             
-            y_mixed = y.repeat(3) # 动态复制标签以对齐 [3B]
+            y_mixed = y.repeat(3) # Repeat labels for [3B]
             loss_total_shared = criterion(logits_mixed, y_mixed)
             loss_total_shared.backward() 
             opt_shared.step()
 
             # =================================================================
-            # 🛡️ [B] MSBN 组: 纯净独立的统计路由隔离
+            # 🛡️ [B] MSBN: isolated BN routing
             # =================================================================
-            # MSBN 在物理上由不同的 BN 构成，必须通过 set_active_task 天然隔离
+            # MSBN uses set_active_task per modality
             
-            # --- 步骤 B1: 提取独立纯净梯度 ---
+            # --- Step B1: clean per-modality grads ---
             # Walkway
             model_msbn.zero_grad()
             model_msbn.set_active_task(0)
@@ -160,13 +160,13 @@ def run_gradient_conflict_analysis(args, data_cache):
             g_msbn_m = get_conv_grads(model_msbn)
             model_msbn.zero_grad()
 
-            # 计算 MSBN 组的健康相似度
+            # MSBN cosine similarity
             ep_sim_msbn['w_i'].append(F.cosine_similarity(g_msbn_w.unsqueeze(0), g_msbn_i.unsqueeze(0)).item())
             ep_sim_msbn['w_m'].append(F.cosine_similarity(g_msbn_w.unsqueeze(0), g_msbn_m.unsqueeze(0)).item())
             ep_sim_msbn['i_m'].append(F.cosine_similarity(g_msbn_i.unsqueeze(0), g_msbn_m.unsqueeze(0)).item())
             
-            # --- 步骤 B2: 真实推进一步 ---
-            # 因为 MSBN 各自走各自的 BN 路径，这里只能采用累加梯度的常规做法
+            # --- Step B2: optimization step ---
+            # MSBN: accumulate grads per modality
             opt_msbn.zero_grad()
             model_msbn.set_active_task(0)
             criterion(model_msbn.shared_head(model_msbn.shared_backbone(model_msbn.encoders['walkway'](x_walk))), y).backward()
@@ -176,7 +176,7 @@ def run_gradient_conflict_analysis(args, data_cache):
             criterion(model_msbn.shared_head(model_msbn.shared_backbone(model_msbn.encoders['imu'](x_imu))), y).backward()
             opt_msbn.step()
 
-        # 记录 Epoch 均值
+        # Log epoch averages
         for k in ['w_i', 'w_m', 'i_m']:
             history['shared'][k].append(np.mean(ep_sim_shared[k]))
             history['msbn'][k].append(np.mean(ep_sim_msbn[k]))
@@ -199,31 +199,31 @@ def plot_gradient_dynamics(history, epochs, save_path):
     labels = {'w_i': 'Walkway vs Insole', 'w_m': 'Walkway vs IMU', 'i_m': 'Insole vs IMU'}
     colors = {'w_i': '#1f77b4', 'w_m': '#ff7f0e', 'i_m': '#2ca02c'}
     
-    # 动态计算最完美的 Y 轴边界，紧贴数据
+    # Tight y-axis limits
     all_vals = []
     for k in ['w_i', 'w_m', 'i_m']:
         all_vals.extend(history['shared'][k])
         all_vals.extend(history['msbn'][k])
     
-    # 取数据绝对值的最大值，再稍微留一点余量 (比如 1.2 倍)
+    # Max abs value * margin
     y_bound = max(abs(min(all_vals)), abs(max(all_vals))) * 1.2
-    if y_bound < 0.05: y_bound = 0.05 # 兜底最小值
-    if y_bound > 0.15: y_bound = 0.15 # 防止个别离群点撑爆画面
+    if y_bound < 0.05: y_bound = 0.05 # floor on y bound
+    if y_bound > 0.15: y_bound = 0.15 # cap y bound for outliers
 
     titles = ["(a) Conventional Shared BN: Gradient Tug-of-War", 
               "(b) Proposed Modality-Specific BN: Orthogonal Routing"]
     
     for i, (ax, model_type) in enumerate(zip(axes, ['shared', 'msbn'])):
-        # 🎨 核心视觉冲击：绘制红绿阴影区
-        # 红色危险区 (负迁移)
+        # 🎨 Red/green shaded regions
+        # Red: negative transfer
         ax.axhspan(-y_bound, 0, color='#ffe6e6', alpha=0.8, zorder=0)
-        # 绿色安全区 (独立正交与正迁移)
+        # Green: orthogonal / positive transfer
         ax.axhspan(0, y_bound, color='#e6ffe6', alpha=0.5, zorder=0)
         
-        # 醒目的 0 轴红线
+        # Zero reference line
         ax.axhline(0, color='red', linestyle='--', linewidth=2.5, zorder=1)
 
-        # 画线，增加 marker 点让趋势更硬核
+        # Plot with markers
         for k in ['w_i', 'w_m', 'i_m']:
             ax.plot(x, history[model_type][k], label=labels[k], color=colors[k], 
                     linewidth=2.5, marker='o', markersize=4, zorder=2)
@@ -232,7 +232,7 @@ def plot_gradient_dynamics(history, epochs, save_path):
         ax.set_xlabel("Training Epochs", fontsize=14)
         ax.set_ylim(-y_bound, y_bound)
         
-        # 坐标轴数字格式化，强制保留三位小数，体现精度
+        # Three-decimal axis format
         ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.3f'))
         
         if i == 0:

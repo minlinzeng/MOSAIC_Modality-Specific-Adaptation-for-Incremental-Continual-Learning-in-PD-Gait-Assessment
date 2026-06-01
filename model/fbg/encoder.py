@@ -4,20 +4,20 @@ import torch.nn as nn
 class ResBlock1D(nn.Module):
     def __init__(self, in_channels, out_channels, num_tasks=3, stride=1, drop_rate=0.2, kernel_size=5, disable_msbn=False):
         super().__init__()
-        self.disable_msbn = disable_msbn # 🌟 新增降级开关
+        self.disable_msbn = disable_msbn # Fallback: shared BN instead of MSBN
         padding = kernel_size // 2
         self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding)
         self.act = nn.ReLU()
         self.drop1d = nn.Dropout1d(p=drop_rate) 
         self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=padding)
         
-        # 🌟 动态 BN 分配逻辑
+        # Dynamic BN assignment
         if self.disable_msbn:
-            # 原始基线：所有任务共享同一个 BN，互相污染统计量
+            # Baseline: single shared BN across tasks (statistics can mix)
             self.shared_bn1 = nn.BatchNorm1d(out_channels)
             self.shared_bn2 = nn.BatchNorm1d(out_channels)
         else:
-            # Ours：严格隔离的 MSBN
+            # Ours: task-isolated MSBN
             self.bn1_list = nn.ModuleList([nn.BatchNorm1d(out_channels) for _ in range(num_tasks)])
             self.bn2_list = nn.ModuleList([nn.BatchNorm1d(out_channels) for _ in range(num_tasks)])
         
@@ -29,7 +29,7 @@ class ResBlock1D(nn.Module):
         identity = self.shortcut(x)
         x = self.conv1(x)
         
-        # 🌟 路由分发
+        # BN routing
         if self.disable_msbn:
             x = self.shared_bn1(x)
         else:
@@ -55,7 +55,7 @@ class MICL_CNN_PD_Model(nn.Module):
         self.enc_ang = nn.Conv1d(47, d_model, kernel_size=7, padding=3)
         self.enc_grf = nn.Conv1d(8, d_model, kernel_size=7, padding=3)
         
-        # 将开关传递给残差块
+        # Pass MSBN flag into residual blocks
         self.res1 = ResBlock1D(d_model, d_model, num_tasks, stride=2, drop_rate=dropout, kernel_size=5, disable_msbn=disable_msbn)
         self.res2 = ResBlock1D(d_model, d_model, num_tasks, stride=2, drop_rate=dropout, kernel_size=5, disable_msbn=disable_msbn)
         self.res3 = ResBlock1D(d_model, d_model // 2, num_tasks, stride=2, drop_rate=dropout, kernel_size=5, disable_msbn=disable_msbn)

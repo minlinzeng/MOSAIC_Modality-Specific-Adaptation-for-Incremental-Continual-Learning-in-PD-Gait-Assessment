@@ -15,7 +15,7 @@ import seaborn as sns
 from sklearn.manifold import TSNE
 
 # ==========================================
-# 🚨 绝对纯净的本地 FOG 导入
+# 🚨 Local FOG-only imports
 # ==========================================
 import utility as U
 from encoder import WearGaitUniversal

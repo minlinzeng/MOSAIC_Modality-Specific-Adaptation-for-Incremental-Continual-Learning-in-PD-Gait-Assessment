@@ -10,16 +10,16 @@ import torch.optim as optim
 from sklearn.metrics import f1_score
 from sklearn.model_selection import KFold
 
-# --- 导入 FBG 核心组件 (严格对齐你的工作区) ---
+# --- FBG core imports ---
 from data_loader import get_fbg_dataloaders
 from encoder import MICL_CNN_PD_Model
 from fbg_utility import EarlyStopping, set_deterministic_seed
 
-# 导入 LwI 最优传输模块 (确保路径绝对正确)
+# LwI optimal transport
 from model.baselines.LwI import optimal_transport as ot
 
 # ==========================================
-# LwI 配置与工具函数
+# LwI config and helpers
 # ==========================================
 class OTConfig:
     def __init__(self, args, device):
@@ -54,7 +54,7 @@ def route_modality(batch, device, active_mod):
 
 def recalibrate_bn(model, loader, device, active_mod, task_idx):
     """
-    权重经过 OT 融合后，由于底层分布改变，必须使用新数据重新校准 Shared BN 的运行统计量。
+    After OT fusion, recalibrate shared BN running stats on new data.
     """
     model.train()
     for p in model.parameters(): 
@@ -72,7 +72,7 @@ def recalibrate_bn(model, loader, device, active_mod, task_idx):
     print("   ✅ [LwI] Recalibration Complete.")
 
 # ==========================================
-# 核心训练逻辑 (包含 Chimera KD)
+# Training loop (Chimera KD)
 # ==========================================
 def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_id, device):
     print(f"\n   >>> [LwI] Training '{mod.upper()}' (Task {task_id}) | Feat KD $\lambda$: {args.kd_lambda}")
@@ -82,12 +82,12 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
         model_old.eval()
         for p in model_old.parameters(): p.requires_grad = False
 
-    # 仅开启当前模态的前端编码器，冻结其他历史模态前端
+    # Train current modality encoder only
     if hasattr(model, 'enc_lin'): model.enc_lin.requires_grad_(mod == 'linear')
     if hasattr(model, 'enc_ang'): model.enc_ang.requires_grad_(mod == 'angular')
     if hasattr(model, 'enc_grf'): model.enc_grf.requires_grad_(mod == 'grf')
 
-    # 从当前调度的 args 动态覆盖基础学习率
+    # LR from args
     lr = args.lr if args.lr is not None else (2e-4 if mod == 'grf' else 1e-4)
     wd = 0.05
     dropout_rate = 0.1 if mod == 'grf' else 0.3
@@ -102,11 +102,11 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
     early_stopper = EarlyStopping(patience=15, min_delta=1e-4)
     
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.0) # LwI 基线使用干净的 CE
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.0)  # plain CE
     mse_loss = nn.MSELoss()
     best_eval = 0.0
 
-    # LwI 的 Warmup 设定 (前 5 个 Epoch 冻结共享层，只适应 Encoder)
+    # LwI warmup: freeze shared layers for first 5 epochs
     WARMUP_EPOCHS = 5
 
     for ep in range(1, args.epochs + 1):
@@ -132,18 +132,18 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
             lin, ang, grf, y = route_modality(batch, device, mod)
             optimizer.zero_grad()
             
-            # 前向传播 (提取 FBG 架构中的 pooled 特征作为 Chimera 蒸馏目标)
+            # Forward; pooled features for Chimera KD
             logits_new, z_new = model(x_lin=lin, x_ang=ang, x_grf=grf, current_task=task_id)
             loss_ce = criterion(logits_new, y)
             loss = loss_ce
             loss_kd_val = torch.tensor(0.0)
 
-            # LwI 特征级 KD (Chimera Distillation)
+            # Feature-level Chimera KD
             if model_old is not None and current_lambda > 0:
                 with torch.no_grad():
                     _, z_old = model_old(x_lin=lin, x_ang=ang, x_grf=grf, current_task=task_id-1)
                 
-                # 必须对特征进行 L2 归一化再算 MSE
+                # L2-normalize features before MSE
                 z_new_norm = F.normalize(z_new, p=2, dim=1)
                 z_old_norm = F.normalize(z_old, p=2, dim=1)
                 
@@ -161,7 +161,7 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
             accum["correct"] += (logits_new.argmax(dim=1) == y).sum().item()
             accum["total"] += y.size(0)
 
-        # 验证评估
+        # Validation
         model.eval()
         all_preds, all_targets = [], []
         with torch.no_grad():
@@ -205,48 +205,48 @@ def evaluate_cl(model, dataloader, device, eval_mod, eval_task_idx):
 
 def get_all_subjects(data_root):
     import glob
-    # 🌟 强力兼容：同时扫描当前目录及深层子目录下的所有 .pkl 文件
+    # Scan root and subdirs for .pkl
     search_path = os.path.join(data_root, "**", "*.pkl")
     files = glob.glob(search_path, recursive=True)
     
-    # 如果根目录下没有，退而求其次扫描普通路径
+    # Fallback glob if empty
     if not files:
         files = glob.glob(os.path.join(data_root, "*.pkl"))
         
     if len(files) == 0:
         raise FileNotFoundError(
-            f"\n❌ [Fatal Error] 在你指定的 --data_root 路径下未找到任何 .pkl 文件！\n"
-            f"🔍 检查当前扫描路径: {os.path.abspath(data_root)}\n"
-            f"💡 请核对该目录下是否存在有效的数据集。"
+            f"\n[Fatal Error] No .pkl files under --data_root!\n"
+            f"Scanned path: {os.path.abspath(data_root)}\n"
+            f"Verify the dataset directory is correct."
         )
         
-    # 🌟 强力鲁棒解析：兼容 'sub01_walk1.pkl' 或 'sub01-1_linear_raw.pkl' 等多种切分命名
+    # Robust subject id parsing for varied naming
     subjects = set()
     for f in files:
         base = os.path.basename(f)
-        # 优先通过下划线切分，如果不行则通过短横线
+        # Split on '_' or '-'
         sub_part = base.split('_')[0] if '_' in base else base.split('-')[0]
         subjects.add(sub_part)
         
     return sorted(list(subjects))
 
 # ==========================================
-# 主控与交叉验证 (Cross Validation & OT Fusion)
+# CV and OT fusion driver
 # ==========================================
 def main():
     parser = argparse.ArgumentParser(description="FBG LwI Baseline Execution Script")
-    # 🚨 核心修复：全面补齐自动化管道所需的接收接口，消除 unrecognized arguments 幽灵报错
+    # CLI args for automated runner compatibility
     parser.add_argument('--data_root', type=str, required=True)
     parser.add_argument('--order', type=str, default="linear,angular,grf")
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--lr', type=float, default=1e-4, help="Learning rate injection") # 💡 彻底修复此行
+    parser.add_argument('--lr', type=float, default=1e-4, help="Learning rate")
     parser.add_argument('--epochs', type=int, default=70)
     parser.add_argument('--window_size', type=int, default=256)
     parser.add_argument('--step_size', type=int, default=64)
     parser.add_argument('--d_model', type=int, default=64)
     
-    # 🚨 核心修改：将原先的 disable_dbn 改为严格契合 FBG 编码器架构的 disable_msbn
+    # disable_msbn flag (FBG encoder)
     parser.add_argument("--disable_msbn", action='store_true', help="Force network to drop MSBN and downgrade to Shared BN")
 
     # LwI (OT) Specific Arguments
@@ -257,7 +257,7 @@ def main():
     
     args = parser.parse_args()
     
-    # 强制将内部机制降级为传统的 Shared BN，从物理上隔离参数隔离红利
+    # Shared BN baseline for fair comparison
     disable_msbn_flag = True
 
     set_deterministic_seed(args.seed)
@@ -286,16 +286,16 @@ def main():
             batch_size=args.batch_size, window_size=args.window_size, step_size=args.step_size
         )
         
-        # 初始化模型 (传入 disable_msbn=True，强制毁灭多通道统计路由，实现绝对公平参数量对比)
+        # Model with disable_msbn=True (shared BN baseline)
         model = MICL_CNN_PD_Model(d_model=args.d_model, dropout=0.3, num_tasks=num_tasks, disable_msbn=disable_msbn_flag).to(device)
         model_old = None
 
         for task_idx, active_mod in enumerate(tasks):
             
-            # 1. 训练当前增量任务
+            # 1. Train current task
             train_lwi_task(args, model, model_old, train_loader, test_loader, active_mod, task_idx, device)
 
-            # 2. 执行 OT 权重拓扑融合
+            # 2. OT weight fusion
             if model_old is not None:
                 print("\n   🧬 [LwI] Performing Optimal Transport (OT) Weight Fusion...")
                 fused_dict = ot.get_wassersteinized_layers_modularized(
@@ -308,12 +308,12 @@ def main():
                         current_state[layer_name].copy_(new_weight)
                 model.load_state_dict(current_state)
                 
-                # 3. 重新校准 Shared BN
+                # 3. Recalibrate shared BN
                 recalibrate_bn(model, train_loader, device, active_mod, task_idx)
 
             model_old = copy.deepcopy(model)
 
-            # 4. 增量矩阵 R 计算
+            # 4. R matrix eval
             print(f"   [EVAL] Sequential Backward Testing...")
             for j in range(task_idx + 1):
                 eval_mod = tasks[j]

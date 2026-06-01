@@ -132,35 +132,35 @@ def evaluate_classification(model, loader, device, metric='f1_macro'):
 
 def compute_modality_analysis(features_A, features_B, target_dim=None):
     """
-    严格基于经典文献的 Modality Gap & Variance Shift 计算工具
-    - Gap 基于: Liang et al., NeurIPS 2022
-    - Variance 基于: Li et al., ICLR 2017
+    Modality gap and variance shift (literature-based)
+    - Gap from: Liang et al., NeurIPS 2022
+    - Variance from: Li et al., ICLR 2017
     """
-    # 确保没有梯度追踪干扰
+    # No grad tracking
     features_A = features_A.detach()
     features_B = features_B.detach()
     
     # ==========================================
-    # 1. 方差比例计算 (Variance Shift)
+    # 1. Variance shift ratio
     # ==========================================
-    # dim=0 计算通道级别在 Batch 上的分布方差，对应 BN 的统计维度
+    # Channel variance over batch (BN stats)
     var_A = features_A.var(dim=0).mean().item()
     var_B = features_B.var(dim=0).mean().item()
     var_ratio = var_B / var_A if var_A != 0 else 0
 
     # ==========================================
-    # 2. 模态鸿沟计算 (Modality Gap)
+    # 2. Modality gap
     # ==========================================
     
-    # a. 特征 L2 归一化 (将其投射到半径为 1 的超球面上，消除尺度影响)
+    # L2-normalize to unit sphere
     norm_A = F.normalize(features_A, p=2, dim=1)
     norm_B = F.normalize(features_B, p=2, dim=1)
     
-    # b. 计算两个模态流形的质心 (Centroid)
+    # Per-modality centroids
     centroid_A = norm_A.mean(dim=0)
     centroid_B = norm_B.mean(dim=0)
     
-    # c. 计算质心之间的欧氏距离 (Euclidean Distance)
+    # Centroid Euclidean distance
     delta_gap = torch.norm(centroid_A - centroid_B, p=2).item()
         
     return delta_gap, var_ratio
@@ -208,15 +208,15 @@ def log_training_curves_to_csv(csv_path, fold_idx, mod, ep, avg_metrics, alpha, 
         writer.writerow([
             fold_idx, mod, ep, 
             f"{avg_metrics['loss']:.4f}", 
-            f"{avg_metrics['raw_ce']:.4f}",       # CE 没有权重衰减，直接用 raw
-            f"{avg_metrics['w_ewc']:.4f}",        # 必须用 w_ewc
-            f"{avg_metrics['w_kd']:.4f}",         # 必须用 w_kd
-            f"{avg_metrics['w_repul']:.4f}",      # 必须用 w_repul
+            f"{avg_metrics['raw_ce']:.4f}",       # CE uses raw (no weighting)
+            f"{avg_metrics['w_ewc']:.4f}",        # use w_ewc
+            f"{avg_metrics['w_kd']:.4f}",         # use w_kd
+            f"{avg_metrics['w_repul']:.4f}",      # use w_repul
             f"{alpha:.4f}", f"{kd_lambda:.4f}",
             f"{val_f1:.4f}"
         ])
 
-# --- 2. 替换 analyze_fisher_cosine_similarity (修正致命的维度错误) ---
+# --- 2. Replace analyze_fisher_cosine_similarity (dim fix) ---
 def analyze_fisher_cosine_similarity(ewc_instance, task_A=0, task_B=1):
     print(f"\n   🔍 [Analysis] Computing Fisher Cosine Similarity between Task {task_A} and Task {task_B}...")
     model = ewc_instance.model
@@ -228,7 +228,7 @@ def analyze_fisher_cosine_similarity(ewc_instance, task_A=0, task_B=1):
             if hasattr(model, buffer_name_A) and hasattr(model, buffer_name_B):
                 fisher_A, fisher_B = getattr(model, buffer_name_A), getattr(model, buffer_name_B)
                 
-                # 【严格数学修正】：将所有空间和输入通道维度拉平求和，只保留 C_out 的曲率指纹
+                # Flatten spatial/input dims; keep C_out Fisher fingerprint
                 imp_A = fisher_A.view(fisher_A.size(0), -1).sum(dim=1)
                 imp_B = fisher_B.view(fisher_B.size(0), -1).sum(dim=1)
                 

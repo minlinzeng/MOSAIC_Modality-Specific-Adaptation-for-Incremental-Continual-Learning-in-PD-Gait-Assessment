@@ -12,14 +12,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.manifold import TSNE
 
-# --- FBG 项目专用导入 ---
+# --- FBG project imports ---
 from data_loader import get_fbg_dataloaders
 from encoder import MICL_CNN_PD_Model
 from fbg_utility import set_deterministic_seed, EarlyStopping
 from model.paths import FBG_PROCESSED, as_str
 
 # =====================================================================
-# 🌟 1. FBG 架构适配器 (DRMN Wrapper)
+# 1. FBG architecture adapter (DRMN wrapper)
 # =====================================================================
 class FBGEncoderWrapper(nn.Module):
     def __init__(self, encoder, input_drop):
@@ -54,7 +54,7 @@ class FBGSharedHead(nn.Module):
         return self.fc(self.dropout(x))
 
 class DRMNFBGModel(nn.Module):
-    """为 DRMN 设计的 FBG 包装器。强制 disable_msbn=True，纯净网络。"""
+    """FBG wrapper for DRMN; disable_msbn=True for a plain shared-BN network."""
     def __init__(self, d_model=64, num_tasks=3, dropout=0.3):
         super().__init__()
         self.base_model = MICL_CNN_PD_Model(d_model=d_model, num_tasks=num_tasks, dropout=dropout, disable_msbn=True)
@@ -82,7 +82,7 @@ class DRMNFBGModel(nn.Module):
         return self.shared_head(z)
 
 # =====================================================================
-# 🌟 2. DRMN Manager (严格保留你的原版锁定逻辑)
+# 2. DRMN manager (original weight-locking logic)
 # =====================================================================
 class DRMN_Manager:
     def __init__(self, model, lock_ratio=0.4):
@@ -150,12 +150,12 @@ class DRMN_Manager:
         print(f"       -> Permanent Backbone Capacity Claimed by Task {self.active_task_id}: {total_locked / total_params * 100:.2f}%")
 
 # =====================================================================
-# 🌟 3. FBG 定制的训练循环与数据路由
+# 3. FBG training loop and data routing
 # =====================================================================
 def train_drmn_task(args, model, drmn_manager, train_loader, val_loader, mod, task_id, device, epochs, patience):
     print(f"\n   >>> [DRMN] Training '{mod}' (Task {task_id}) with Hard Gradient Masking...")
     
-    # 针对不同模态设定学习率
+    # Modality-specific learning rate
     lr = 2e-4 if mod == 'grf' else 1e-4
 
     drmn_manager.switch_task(task_id)
@@ -176,7 +176,7 @@ def train_drmn_task(args, model, drmn_manager, train_loader, val_loader, mod, ta
         
         accum = {"loss": 0, "correct": 0, "total": 0}
 
-        # 🌟 修改点 1：解包 FBG 的字典格式
+        # Unpack FBG dict batch format
         for batch in train_loader:
             x = batch[mod].to(device)
             y = batch['label'].to(device)
@@ -243,7 +243,7 @@ def run_cv_drmn(args):
         train_subjects = [subjects[i] for i in train_idx]
         test_subjects = [subjects[i] for i in test_idx]
         
-        # 🌟 使用 FBG 专属大字典 Dataloader
+        # FBG multi-modality dict dataloader
         train_loader, test_loader = get_fbg_dataloaders(
             args.data_root, train_subjects, test_subjects, 
             batch_size=args.batch_size, window_size=args.window_size, step_size=args.step_size
@@ -310,11 +310,11 @@ if __name__ == "__main__":
     ap.add_argument('--batch_size', type=int, default=64)
     ap.add_argument('--epochs', type=int, default=50)
     
-    # 🌟 强制物理时间窗对齐
+    # Sliding-window alignment (physical time)
     ap.add_argument('--window_size', type=int, default=256)
     ap.add_argument('--step_size', type=int, default=64)
     
-    # DRMN 专属
+    # DRMN-specific
     ap.add_argument("--lock_ratio", type=float, default=0.4, help="Percentage of free weights to lock per task")
     
     args = ap.parse_args()

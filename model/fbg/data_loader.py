@@ -15,12 +15,12 @@ class FBGIncrementalDataset(Dataset):
         self.step_size = step_size
         self.modality_drop_prob = modality_drop_prob if mode == 'train' else 0.0
         
-        self.walks = []   # 存储完整的序列流形
-        self.windows = [] # 存储锚点索引
+        self.walks = []   # full sequence manifolds
+        self.windows = [] # window anchor indices
         
         all_pkl_files = glob.glob(os.path.join(data_root, '*.pkl'))
         if len(all_pkl_files) == 0:
-            raise FileNotFoundError(f"未在 {data_root} 找到任何 PKL 数据文件！")
+            raise FileNotFoundError(f"No PKL files found under {data_root}!")
 
         for pkl_file in tqdm(all_pkl_files, desc=f"Loading {mode} dataset"):
             walk_id = os.path.basename(pkl_file).replace('.pkl', '')
@@ -46,7 +46,7 @@ class FBGIncrementalDataset(Dataset):
                 'linear': X_lin, 'angular': X_ang, 'grf': X_grf, 'label': label, 'T': T
             })
             
-            # 生成静态锚点
+            # static window anchors
             for start in range(0, T - self.window_size + 1, self.step_size):
                 self.windows.append({'walk_idx': walk_idx, 'start': start})
 
@@ -58,7 +58,7 @@ class FBGIncrementalDataset(Dataset):
         walk = self.walks[item['walk_idx']]
         start_idx = item['start']
         
-        # 🌟 方案 B：时域相位抖动 (Temporal Phase Jittering)
+        # Temporal phase jittering
         if self.mode == 'train':
             jitter = torch.randint(-15, 16, (1,)).item()
             start_idx = max(0, min(start_idx + jitter, walk['T'] - self.window_size))
@@ -89,7 +89,7 @@ def get_fbg_dataloaders(data_root, train_subjects, test_subjects, batch_size=64,
         window_size=window_size, step_size=step_size, modality_drop_prob=0.0
     )
     
-    # 强制单线程，防止 OOM 与 I/O 阻塞
+    # num_workers=0 to avoid OOM / I/O contention
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=1, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=1, pin_memory=True)
     

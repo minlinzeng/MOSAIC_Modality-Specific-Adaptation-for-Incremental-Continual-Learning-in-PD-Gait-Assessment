@@ -6,15 +6,15 @@ import argparse
 from model.paths import WEARGAIT_EWC, WEARGAIT_EWC_LOG_ABLA2, as_str
 
 # ================= 1. ENVIRONMENT & HARDWARE SETUP =================
-# 统一管理脚本的根目录
+# Script and log directories
 SCRIPT_DIR = as_str(WEARGAIT_EWC)
 LOG_BASE = as_str(WEARGAIT_EWC_LOG_ABLA2)
 
 SEEDS = [2, 3, 42, 43, 44]
-# SEEDS = [3,] # 💡 如果你想测试全量 Seed，把这行注释掉
+# SEEDS = [3,] # 💡 Uncomment to run all seeds
 
 # ================= 2. PARAMETER POOLS (STRICT ISOLATION) =================
-# 🛡️ 所有脚本（消融 + 基线）都必须共享的核心安全参数
+# 🛡️ Shared safe hyperparameters for ablations and baselines
 COMMON_ARGS = {
     "--order": "walkway,imu,insole",
     "--batch_size": "128",
@@ -27,7 +27,7 @@ COMMON_ARGS = {
     "--num_classes": "2",
 }
 
-# 🛡️ 仅属于我们自己方法 (weargait_train2.py) 的专有参数
+# 🛡️ Method-specific args for weargait_train2.py
 OURS_BASE_ARGS = {
     "--mode": "cl",
     "--lr_we": "10",
@@ -35,7 +35,7 @@ OURS_BASE_ARGS = {
     "--fisher_batches": "64",
 }
 
-# 公共组件提取，避免代码冗余
+# Shared repulsive-loss args
 COMMON_REPUL_ARGS = {
     "--ewc_lambda": "5000.0", 
     "--kd_lambda": "1.0", 
@@ -46,7 +46,7 @@ COMMON_REPUL_ARGS = {
 
 # ================= 3. EXPERIMENT REGISTRY =================
 
-# --- 3.1 核心基线与组件消融 (Indices 1 to 5) ---
+# --- 3.1 Core ablations (indices 1-5) ---
 CORE_ABLATIONS = [
     {"name": "01_Naive_Finetuning", "args": {"--disable_dbn": "", "--ewc_lambda": "0.0", "--kd_lambda": "0.0", "--repulsive_alpha": "0.0", "--analyze_overlap": ""}},
     {"name": "02_EWC_Only", "args": {"--disable_dbn": "", "--ewc_lambda": "5000.0", "--kd_lambda": "0.0", "--repulsive_alpha": "0.0", "--analyze_overlap": ""}},
@@ -56,7 +56,7 @@ CORE_ABLATIONS = [
     {"name": "05_Ours_Full", "args": {**COMMON_REPUL_ARGS, "--repulsive_margin": "0.3", "--p_degree": "5.0"}}
 ]
 
-# --- 3.2 早期基于 m=0.1 的 Gamma(p) 消融 (Indices 6 to 11) ---
+# --- 3.2 Gamma(p) ablations at m=0.1 (indices 6-11) ---
 GAMMA_OLD_ABLATIONS = [
     {"name": f"06_p1", "args": {**COMMON_REPUL_ARGS, "--repulsive_margin": "0.3", "--p_degree": "1.0"}},
     {"name": f"07_p3", "args": {**COMMON_REPUL_ARGS, "--repulsive_margin": "0.3", "--p_degree": "3.0"}},
@@ -66,7 +66,7 @@ GAMMA_OLD_ABLATIONS = [
     {"name": f"11_p.5", "args": {**COMMON_REPUL_ARGS, "--repulsive_margin": "0.3", "--p_degree": "0.5"}},
 ]
 
-# --- 3.3 拓扑边界 Margin(m) 消融 (Indices 12 to 25) ---
+# --- 3.3 Margin(m) sweep (indices 12-25) ---
 M_MARGINS = [-0.2, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0]
 M_ABLATIONS = []
 for idx, m_val in enumerate(M_MARGINS, start=12):
@@ -75,7 +75,7 @@ for idx, m_val in enumerate(M_MARGINS, start=12):
         "args": {**COMMON_REPUL_ARGS, "--repulsive_margin": str(m_val), "--p_degree": "5.0"}
     })
 
-# --- 3.4 终极对决：基于最优 m=0.7 的新 Gamma 消融 (Indices 26 to 32) ---
+# --- 3.4 Gamma(p) sweep at optimal m=0.7 (indices 26-32) ---
 OPT_M = "0.7"
 NEW_P_DEGREES = ["0.1", "0.3", "0.5", "1.0", "3.0", "5.0", "8.0"]
 GAMMA_NEW_ABLATIONS = []
@@ -85,7 +85,7 @@ for idx, p_val in enumerate(NEW_P_DEGREES, start=26):
         "args": {**COMMON_REPUL_ARGS, "--repulsive_margin": OPT_M, "--p_degree": p_val}
     })
 
-# --- 3.5 🏆 外部 SOTA 基线集成 (Indices 33 to 35) ---
+# --- 3.5 🏆 External SOTA baselines (indices 33-35) ---
 EXTERNAL_BASELINES = [
     {
         "name": "33_Baseline_DRMN", 
@@ -110,38 +110,38 @@ EXTERNAL_BASELINES = [
     }
 ]
 
-# ================= 动态合并所有实验 =================
+# ================= Merge all experiment configs =================
 ALL_EXPERIMENTS = CORE_ABLATIONS + GAMMA_OLD_ABLATIONS + M_ABLATIONS + GAMMA_NEW_ABLATIONS + EXTERNAL_BASELINES
 
 # ================= 4. EXECUTION ENGINE =================
 def build_command(exp_dict, seed, gpu_id):
-    # 动态智能路由：如果是基线，就使用它自己的 script；否则使用默认的 weargait_train2.py
+    # Route baselines to their script; else weargait_train2.py
     is_baseline = "script" in exp_dict
     script_name = exp_dict.get("script", "weargait_train2.py")
     script_path = os.path.join(SCRIPT_DIR, script_name)
     
     cmd = ["python", "-u", script_path]
     
-    # 1. 注入绝对安全的全局基础参数
+    # 1. Inject global base args
     merged = COMMON_ARGS.copy()
     
-    # 2. 如果是我们的方法，注入专有参数 (避免破坏基线的 argparse)
+    # 2. Inject method-specific args (skip for baselines)
     if not is_baseline:
         merged.update(OURS_BASE_ARGS)
         
-    # 3. 注入该实验的特化参数
+    # 3. Inject experiment-specific args
     merged.update(exp_dict["args"])
     
-    # 4. 注入硬件与随机种子
+    # 4. Inject device and seed
     merged["--seed"] = str(seed)
     merged["--device"] = f"cuda:{gpu_id}"
     
-    # 5. 仅为我们的方法动态拼接 CSV 记录路径
+    # 5. Attach CSV log path for our method only
     if not is_baseline:
         csv_path = os.path.join(LOG_BASE, exp_dict["name"], f"seed_{seed}_curves.csv")
         merged["--csv_log"] = csv_path
     
-    # 组装 CLI 字符串
+    # Build CLI command
     for key, value in merged.items():
         cmd.append(key)
         if str(value) != "":  
@@ -209,31 +209,31 @@ if __name__ == "__main__":
 
 
 # =========================================================================================
-# 🛠️ 架构师的命令行启动指南 (Execution Cheatsheet)
+# 🛠️ Execution cheatsheet
 # =========================================================================================
 """
-本调度器支持极其细粒度的实验组合，通过 `-r` (运行指定 Index) 和 `-g` (GPU 资源池) 动态控制。
-实验 Index 对应代码中 ALL_EXPERIMENTS 的注册顺序 (1 到 35)。
+Fine-grained experiment control via -r (indices) and -g (GPU pool).
+Indices follow ALL_EXPERIMENTS order (1-35).
 
-【1. 跑所有的外部 SOTA 基线组合 (DRMN, Harmony, LwI)】
+[1] External SOTA baselines (DRMN, Harmony, LwI):
 nohup python -u run_ablations.py -r 33 34 35 -g 0 1 > log_baselines.out 2>&1 &
 
-【2. 单独精准测试某个基线 (例如：刚加进去的最优传输 LwI 基线)】
+[2] Single baseline (e.g. LwI OT):
 nohup python -u run_ablations.py -r 35 -g 0 1 > log_lwi_only.out 2>&1 &
 
-【3. 跑核心的五大递进式消融实验 (Naive, Std CL, DBN, Static Repul, Ours Full)】
+[3] Core five-step ablations:
 nohup python -u run_ablations.py -r 1 2 3 4 5 -g 0 1 > log_core_ablations.out 2>&1 &
 
-【4. 跑拓扑边界 Margin(m) 的地毯式搜索 (Indices 12 to 25)】
+[4] Margin(m) grid (indices 12-25):
 nohup python -u run_ablations.py -r 12 13 14 15 16 17 18 19 20 21 22 23 24 25 -g 0 1 > log_margin_search.out 2>&1 &
 
-【5. 跑 OptM=0.7 下的最优 Gamma(p) 搜索 (Indices 26 to 32)】
+[5] Gamma(p) at OptM=0.7 (indices 26-32):
 nohup python -u run_ablations.py -r 26 27 28 29 30 31 32 -g 0 1 > log_gamma_new.out 2>&1 &
 
-【6. 暴力压测：火力全开跑完所有的 35 个超参组合】
+[6] Run all 35 configurations:
 nohup python -u run_ablations.py -g 0 1 2 3 > log_all_suite.out 2>&1 &
 
-💡 【进阶技巧】
-- 负载均衡：如果你有更多显卡（如 4 张卡），直接写 `-g 0 1 2 3`，调度器会自动将 5 个 Seed 的实验错峰分发到这 4 张卡上，打满 GPU 算力。
-- 中断恢复：如果服务器宕机，你可以直接用 `-r` 挑出没跑完的那些 Index 重新跑，绝不会覆盖已经跑完的正确数据。
+Tips:
+- Load balance across GPUs: -g 0 1 2 3 spreads seeds across cards.
+- Resume after crash: re-run unfinished indices with -r; completed logs are kept.
 """

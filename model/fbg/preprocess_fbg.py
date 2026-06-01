@@ -8,7 +8,7 @@ import pandas as pd
 from scipy import signal
 from tqdm import tqdm
 
-# 屏蔽底层引擎探测时的冗余警告
+# Suppress noisy warnings from engine probing
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 def parse_args():
@@ -24,39 +24,39 @@ def parse_args():
 
 def biomechanical_filter(data_matrix, cutoff_freq, fs, order=4):
     """
-    零相移四阶 Butterworth 低通滤波。
-    在不改变时序因果性的前提下，平滑高频底噪与导数伪影。
+    Zero-phase 4th-order Butterworth low-pass filter.
+    Smooths high-frequency noise and derivative artifacts without breaking temporal causality.
     """
     nyquist = 0.5 * fs
     normal_cutoff = cutoff_freq / nyquist
     b, a = signal.butter(order, normal_cutoff, btype='low', analog=False)
-    # filtfilt 执行前向和后向滤波，实现严格的零相移
+    # filtfilt: forward + backward pass for strict zero-phase filtering
     filtered_data = signal.filtfilt(b, a, data_matrix, axis=0)
     return filtered_data
 
 def auto_trim_deadzone(X_lin, X_ang, X_grf, energy_threshold=1e-3, window=20):
     """
-    联合动能梯度计算，自动切除测试首尾的无效站立期 (Dead-zones)。
+    Joint kinetic-energy profile; trims invalid standing dead-zones at trial start/end.
     """
-    # 提取时间维度
+    # Align time dimension across modalities
     T = min(X_lin.shape[0], X_ang.shape[0], X_grf.shape[0])
     X_lin, X_ang, X_grf = X_lin[:T], X_ang[:T], X_grf[:T]
 
-    # 计算运动状态的局部时间方差 (Local Variance)
+    # Local temporal variance of motion state
     ang_diff = np.sum(np.abs(np.diff(X_ang, axis=0)), axis=1)
     grf_diff = np.sum(np.abs(np.diff(X_grf, axis=0)), axis=1)
     
-    # 融合动能指标并进行平滑
+    # Fuse kinetic indicators and smooth
     energy_profile = ang_diff + grf_diff
-    # 补齐 diff 导致少掉的一帧
+    # Pad one frame lost by diff
     energy_profile = np.append(energy_profile, energy_profile[-1]) 
     energy_profile = np.convolve(energy_profile, np.ones(window)/window, mode='same')
     
-    # 寻找激活区间
+    # Find active interval
     active_indices = np.where(energy_profile > energy_threshold)[0]
     
     if len(active_indices) < 100:
-        # 如果序列过短或未激活，不进行切除以防流形崩溃
+        # Skip trim if too short or inactive to avoid manifold collapse
         return X_lin, X_ang, X_grf
         
     start_idx = max(0, active_indices[0] - window)
@@ -66,11 +66,11 @@ def auto_trim_deadzone(X_lin, X_ang, X_grf, energy_threshold=1e-3, window=20):
 
 def robust_manifold_extraction(file_path, modality_type):
     """
-    穿透异构文件结构提取纯净张量。
-    增加了防御性编程，确保样条插值逻辑在数据严重缺失时依然稳健。
+    Extract a clean tensor from heterogeneous file layouts.
+    Defensive interpolation when data are heavily missing.
     """
     try:
-        # 1. 魔法字节探测与加载
+        # 1. Magic-byte detection and load
         with open(file_path, 'rb') as f:
             magic_bytes = f.read(4)
             
@@ -84,7 +84,7 @@ def robust_manifold_extraction(file_path, modality_type):
             except Exception:
                 df_raw = pd.read_csv(file_path, header=None, sep=r'\t|;|,', engine='python', on_bad_lines='skip')
 
-        # 2. 动态寻址表头
+        # 2. Dynamic header row lookup
         header_idx = -1
         for idx, row in df_raw.iterrows():
             row_str = ' '.join(row.dropna().astype(str))
@@ -95,20 +95,20 @@ def robust_manifold_extraction(file_path, modality_type):
         if header_idx == -1:
             raise ValueError("No valid header (Frame/Time) found.")
             
-        # 3. 剥离冗余元数据并转化为数值矩阵
+        # 3. Strip metadata and cast to numeric matrix
         df_clean = df_raw.iloc[header_idx + 1:].copy()
         df_clean.columns = df_raw.iloc[header_idx]
         df_clean = df_clean.dropna(axis=1, how='all').dropna(axis=0, how='all')
         data_matrix = df_clean.apply(pd.to_numeric, errors='coerce').values
         
         # ==========================================
-        # 4. 连续流形重建 (插值前置)
+        # 4. Continuous manifold reconstruction (interpolate first)
         # ==========================================
         if np.isnan(data_matrix).any():
             df_temp = pd.DataFrame(data_matrix)
             total_frames = len(df_temp)
             
-            # 绝对防御：信息保留率截断 (剔除重度损坏通道)
+            # Drop channels with low retention ratio (heavily corrupted)
             valid_counts = df_temp.count()
             retention_ratio = valid_counts / total_frames
             bad_cols = retention_ratio[retention_ratio < 0.60].index
@@ -116,36 +116,36 @@ def robust_manifold_extraction(file_path, modality_type):
             if len(bad_cols) > 0:
                 df_temp.loc[:, bad_cols] = 0.0
                 
-            # 动态降阶插值：逻辑严密化，防止样条插值触发矩阵异常
-            # 仅对存在 NaN 的列进行处理
+            # Per-column interpolation; fall back if spline fails
+            # Only columns with NaNs
             for col in df_temp.columns:
                 if df_temp[col].isna().any():
-                    # 只要存在至少 2 个非 NaN 值，即可尝试三次样条插值
+                    # Cubic spline if at least 2 valid points
                     if df_temp[col].count() >= 2:
                         try:
                             df_temp[col] = df_temp[col].interpolate(method='cubicspline', limit_direction='both')
                         except (ValueError, np.linalg.LinAlgError):
-                            # 若物理奇点导致样条崩塌，降级为线性插值
+                            # Fall back to linear if spline singular
                             df_temp[col] = df_temp[col].interpolate(method='linear', limit_direction='both')
             
-            # 最终兜底：清理一切遗漏的 NaN
+            # Final pass: fill any remaining NaNs
             df_filled = df_temp.bfill().ffill().fillna(0.0)
             data_matrix = df_filled.values
             
         # ==========================================
-        # 5. 脉冲抑制 (安全后置)
+        # 5. Impulse suppression (after interpolation)
         # ==========================================
-        # 仅对具备时序连续性的光学模态执行中值滤波
+        # Median filter only for temporally continuous optical modalities
         if modality_type in ['linear', 'angular']:
             data_matrix = signal.medfilt(data_matrix, kernel_size=(3, 1))
             
         return data_matrix
 
     except Exception as e:
-        # 将具体错误抛出，以便 diagnostic 日志记录
+        # Re-raise for diagnostic logging
         raise RuntimeError(f"Extraction failure: {str(e)}")
         
-import traceback # 在文件开头别忘了加上这个，用于捕获具体报错行数
+import traceback # For stack traces in diagnostic logs
 
 def process_fbg_dataset(data_root, out_dir):
     os.makedirs(out_dir, exist_ok=True)
@@ -155,7 +155,7 @@ def process_fbg_dataset(data_root, out_dir):
     
     success_count, fail_count = 0, 0
     
-    # 🌟 新增：诊断日志追踪器
+    # Diagnostic log collector
     diagnostic_logs = []
 
     for subj_dir in tqdm(subject_dirs, desc="Compiling Biomechanical Manifolds"):
@@ -168,7 +168,7 @@ def process_fbg_dataset(data_root, out_dir):
             ang_file = f"{base_name}_angular_kinematics.csv"
             grf_file = f"{base_name}_grf.csv"
             
-            # 1. 物理文件缺失检测
+            # 1. Missing-file check
             if not (os.path.exists(ang_file) and os.path.exists(grf_file)):
                 fail_count += 1
                 missing_info = []
@@ -182,33 +182,33 @@ def process_fbg_dataset(data_root, out_dir):
                 continue
             
             try:
-                # Phase 1: 独立流形提取
+                # Phase 1: Per-modality manifold extraction
                 X_lin = robust_manifold_extraction(lin_file, modality_type='linear')
                 X_ang = robust_manifold_extraction(ang_file, modality_type='angular')
                 X_grf = robust_manifold_extraction(grf_file, modality_type='grf')
                 
-                # Phase 2: 频域重采样与全局对齐
+                # Phase 2: Resample and align lengths
                 T_kin = min(X_lin.shape[0], X_ang.shape[0])
                 X_lin, X_ang = X_lin[:T_kin, :], X_ang[:T_kin, :]
                 
                 if X_grf.shape[0] != T_kin:
                     X_grf = signal.resample(X_grf, T_kin, axis=0)
                 
-                # Phase 3: 自适应动能截断
+                # Phase 3: Adaptive kinetic trim
                 X_lin, X_ang, X_grf = auto_trim_deadzone(X_lin, X_ang, X_grf)
                 
-                # Phase 4: 零相移生物力学低通滤波
+                # Phase 4: Zero-phase biomechanical low-pass filter
                 X_lin = biomechanical_filter(X_lin, cutoff_freq=6.0, fs=150.0)
                 X_ang = biomechanical_filter(X_ang, cutoff_freq=6.0, fs=150.0)
                 X_grf = biomechanical_filter(X_grf, cutoff_freq=30.0, fs=150.0)
                 
-                # Phase 5: 绝对物理域剥离
+                # Phase 5: Remove absolute position offset
                 X_lin = X_lin - X_lin[0, :]
                 
-                # Phase 6: 终极量纲统一定理 (确保你已经加入了 z-score 那个函数)
+                # Phase 6: Per-instance z-score normalization
                 X_lin, X_ang, X_grf = instance_level_standardization(X_lin, X_ang, X_grf)
                 
-                # 打包序列化
+                # Serialize to PKL
                 modality_dict = {
                     "walk_id": walk_id,
                     "linear_kinematics": X_lin.astype(np.float32),
@@ -223,7 +223,7 @@ def process_fbg_dataset(data_root, out_dir):
                 success_count += 1
                 
             except Exception as e:
-                # 🌟 新增：捕获导致流形崩塌的具体原因
+                # Record manifold failure reason
                 fail_count += 1
                 diagnostic_logs.append({
                     "walk_id": walk_id,
@@ -233,23 +233,23 @@ def process_fbg_dataset(data_root, out_dir):
                 
     print(f"\n[Rigorous Processing Complete] Success: {success_count} | Failed: {fail_count}")
     
-    # 🌟 新增：导出诊断报告
+    # Export diagnostic report
     if diagnostic_logs:
         log_df = pd.DataFrame(diagnostic_logs)
         log_path = os.path.join(data_root, 'preprocessing_diagnostics.csv')
         log_df.to_csv(log_path, index=False)
-        print(f"\n[!] 发现了 {fail_count} 个崩塌流形。诊断报告已生成: {log_path}")
-        print("最常见的错误类型统计：")
+        print(f"\n[!] {fail_count} failed manifolds. Diagnostic report: {log_path}")
+        print("Most common error types:")
         print(log_df['error_type'].value_counts())
 
 def instance_level_standardization(X_lin, X_ang, X_grf):
     """
-    独立序列标准化 (Instance Normalization)。
-    彻底解耦物理量纲的绝对幅值，迫使 1D-CNN 仅关注病理流形的相对形态变异。
+    Per-sequence instance normalization.
+    Removes absolute scale so the 1D-CNN focuses on relative manifold shape.
     """
     def z_score(matrix):
-        # 沿时间轴 (axis=0) 计算每个独立物理通道的均值与标准差
-        # 加上 1e-8 极小值防止静默通道导致的除零错误
+        # Mean/std per channel along time (axis=0)
+        # 1e-8 avoids division by zero on silent channels
         mu = np.mean(matrix, axis=0)
         sigma = np.std(matrix, axis=0)
         return (matrix - mu) / (sigma + 1e-8)

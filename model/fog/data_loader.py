@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from collections import defaultdict
 
-# ==================== 0. 全局特征映射 (严格对应 preprocessing_fog 产出) ====================
+# ==================== 0. Global feature map (matches preprocessing_fog output) ====================
 ACC_COLS = ['Acc_X', 'Acc_Y', 'Acc_Z']
 GYR_COLS = ['Gyr_X', 'Gyr_Y', 'Gyr_Z']
 SKEL_COLS = [f'Skel_{i}' for i in range(21)]
@@ -25,7 +25,7 @@ class GaitAugmenter:
         self.sigma = jitter_sigma    
         self.scale_min = scale_min   
         self.scale_max = scale_max   
-        self.mask_ratio = mask_ratio # 新增遮挡率
+        self.mask_ratio = mask_ratio # temporal mask ratio
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         if torch.rand(1).item() > self.p:
@@ -38,8 +38,8 @@ class GaitAugmenter:
         noise = torch.randn_like(aug_x) * self.sigma
         aug_x = aug_x + noise
         
-        # 3. 🚨 强效抗过拟合：随机时域遮挡 (Temporal Cutout)
-        # 随机将一小段连续的时间步归零
+        # 3. 🚨 Strong regularization: temporal cutout
+        # Zero out a contiguous time span
         seq_len = aug_x.size(1) # x is [Channels, Time]
         mask_len = int(seq_len * self.mask_ratio)
         if mask_len > 0:
@@ -49,11 +49,11 @@ class GaitAugmenter:
         return aug_x
 
         
-# ==================== 1. 全局内存缓存 (I/O 瓶颈突破) ====================
+# ==================== 1. Global in-memory cache (I/O speedup) ====================
 def preload_all_subjects(data_dir: Path) -> Dict[str, Dict[str, pd.DataFrame]]:
     """
-    一次性将所有对齐后的 30Hz PKL 读入 RAM。
-    目录结构要求: data_dir / "sub01-1_acc_raw.pkl"
+    Load all aligned 30Hz PKL files into RAM.
+    Expected: data_dir / "sub01-1_acc_raw.pkl"
     """
     print(f">> 🚀 [I/O] 预加载 FOG 流形数据至内存: {data_dir}...")
     cache = {}
@@ -76,15 +76,15 @@ def preload_all_subjects(data_dir: Path) -> Dict[str, Dict[str, pd.DataFrame]]:
         except Exception as e:
             print(f"⚠️ [警告] 无法读取 {f.name}: {e}")
             
-    # 清理不完整的数据 (必须同时拥有3个模态)
+    # Drop sessions missing any of the three modalities
     valid_cache = {sid: mods for sid, mods in cache.items() if len(mods) == 3}
     print(f">> ✅ 成功缓存 {len(valid_cache)} 个完整多模态 Sessions。")
     return valid_cache
 
-# ==================== 2. 全局统计与归一化 ====================
+# ==================== 2. Global fold statistics and normalization ====================
 def calc_fold_stats(train_subs: List[str], global_cache: Dict, modalities: Tuple[str]) -> Dict[str, Tuple[float, float]]:
     """
-    动态计算当前 Fold 训练集的 Mean 和 Std，防止测试集数据泄露 (Data Leakage)。
+    Compute train-fold mean/std only to avoid leakage.
     """
     print(f"  > 🧮 [Math] 严格计算当前 Fold 训练分布参数...")
     sums, sumsqs, counts = defaultdict(float), defaultdict(float), defaultdict(int)
@@ -114,11 +114,11 @@ def calc_fold_stats(train_subs: List[str], global_cache: Dict, modalities: Tuple
         stats[c] = (mean, max(np.sqrt(var), 1e-6))
     return stats
 
-# ==================== 3. 核心滑动窗口数据集 ====================
+# ==================== 3. Sliding-window dataset ====================
 class FOGLazyDataset(Dataset):
     """
-    FOG 连续学习专用 Dataset。
-    在 30Hz 下，win_len=120 代表 4秒完整的步态周期。
+    FOG continual-learning dataset.
+    At 30Hz, win_len=120 is a 4s gait cycle.
     """
     def __init__(self, subject_ids: List[str], global_cache: Dict, stats: Dict, 
                  modalities: Tuple[str], win_len: int = 120, hop_len: int = 15, 
@@ -134,14 +134,14 @@ class FOGLazyDataset(Dataset):
         
         self.indices = []
         
-        # 严格的时间步长截取 (Sliding Window Generation)
+        # Strict sliding windows
         for sid in subject_ids:
             if sid not in self.cache: continue
             
-            # 由于预处理已严格对齐，提取任意模态的行数即可
+            # Aligned preprocessing: any modality row count works
             seq_len = len(self.cache[sid][modalities[0]])
             if seq_len < self.win:
-                continue # 丢弃短于 4 秒的数据
+                continue # Skip windows shorter than 4s
                 
             n_windows = int((seq_len - self.win) // self.hop + 1)
             for i in range(n_windows):
@@ -165,14 +165,14 @@ class FOGLazyDataset(Dataset):
             
             arr = window_df[cols].to_numpy(dtype=np.float32)
             
-            # Z-Score 归一化
+            # Z-score normalization
             means = np.array([self.stats.get(c, (0.0, 1.0))[0] for c in cols], dtype=np.float32)
             stds  = np.array([self.stats.get(c, (0.0, 1.0))[1] for c in cols], dtype=np.float32)
             stds[stds == 0] = 1.0 
             
             arr = (arr - means) / stds
             
-            # 转换为 Tensor，并转置为 (Channels, Time) 以适配 ResBlock1D
+            # Tensor (C, T) for ResBlock1D
             tensor = torch.tensor(arr, dtype=torch.float32).transpose(0, 1) 
             if self.augmenter is not None:
                 tensor = self.augmenter(tensor)
@@ -180,29 +180,29 @@ class FOGLazyDataset(Dataset):
             
         return {"xs": xs, "y": torch.tensor(y, dtype=torch.long), "sid": sid}
 
-# ==================== 4. 交叉验证与标签管理 ====================
+# ==================== 4. CV splits and labels ====================
 def build_subj2label_fog(json_path: str) -> Dict[str, int]:
-    """读取预处理生成的 json 标签字典"""
+    """Load preprocessed subj2label JSON"""
     with open(json_path, 'r') as f:
         return json.load(f)
 
 def make_stratified_folds(subj2label: Dict[str, int], n_folds: int = 5, seed: int = 42):
     """
-    基于 Subject 级别的分层 K 折交叉验证，确保每个 Fold 中各类别的严重程度分布一致，
-    严禁出现同一患者的数据同时存在于 Train 和 Test 中。
+    Stratified subject-level K-fold CV for balanced severity per fold.
+    No subject appears in both train and test.
     """
     rng = random.Random(seed)
     
-    # 按照 subject base (排除后缀 -1, -2) 进行分组，防止同一个患者的多次 trial 泄露
+    # Group by subject base (-1/-2 suffix) to prevent trial leakage
     subject_bases = defaultdict(list)
     base_labels = {}
     
     for sid, label in subj2label.items():
         base_id = sid.split("-")[0] # sub01
         subject_bases[base_id].append(sid)
-        base_labels[base_id] = label # 假设同一个 base 的 label 是一致的
+        base_labels[base_id] = label # Assume consistent label per subject base
 
-    # 按照类别进行分层
+    # Stratify by class
     class_groups = defaultdict(list)
     for base_id, label in base_labels.items():
         class_groups[label].append(base_id)
@@ -214,7 +214,7 @@ def make_stratified_folds(subj2label: Dict[str, int], n_folds: int = 5, seed: in
     for f in range(n_folds):
         test_bases = []
         for label, bases in class_groups.items():
-            # 均匀分配每个类别的 base_id 到各个 fold
+            # Distribute each class across folds
             chunk_size = max(1, len(bases) // n_folds)
             start_idx = f * chunk_size
             end_idx = start_idx + chunk_size if f < n_folds - 1 else len(bases)
@@ -222,7 +222,7 @@ def make_stratified_folds(subj2label: Dict[str, int], n_folds: int = 5, seed: in
             
         train_bases = [b for b in base_labels.keys() if b not in test_bases]
         
-        # 展开为具体的 Session IDs
+        # Expand to session IDs
         train_subs = [sid for base in train_bases for sid in subject_bases[base]]
         test_subs = [sid for base in test_bases for sid in subject_bases[base]]
         
@@ -230,7 +230,7 @@ def make_stratified_folds(subj2label: Dict[str, int], n_folds: int = 5, seed: in
         
     return folds
 
-# ==================== 5. 接口封装 (无缝衔接现有训练代码) ====================
+# ==================== 5. Training API wrappers ====================
 def prepare_split(train_subs, test_subs, data_cache, win: int = 120, hop: int = 15, modalities=("acc", "gyr", "skeleton")):
     stats = calc_fold_stats(train_subs, data_cache, modalities)
     return {
@@ -269,12 +269,12 @@ def make_sync_loaders(prep_data, subj2label, batch_size=64, num_workers=4, **kwa
     
     return train_loader, test_loader
 
-# 兼容 WearGaitTrain 的 Dataset 包装器
+# WearGaitTrain-compatible dataset wrapper
 class SingleModalityDataset(Dataset):
     def __init__(self, full_dataset, mod_index=0):
         self.ds = full_dataset
         self.mod_idx = mod_index
-        self.labels = self.ds.labels # 透传 label 给 WeightedSampler
+        self.labels = self.ds.labels # Expose labels for WeightedSampler
         
     def __len__(self):
         return len(self.ds)

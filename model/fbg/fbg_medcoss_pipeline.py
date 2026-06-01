@@ -11,7 +11,7 @@ from sklearn.model_selection import KFold
 from sklearn.cluster import KMeans
 from torch.utils.data import DataLoader
 
-# 引入我们重构的 FBG 核心
+# FBG MedCoSS core imports
 from fbg_medcoss_core import FBG_Unified_Model, FBG_Buffer_Dataset
 from data_loader import get_fbg_dataloaders
 from fbg_utility import set_deterministic_seed
@@ -21,16 +21,16 @@ from torch.utils.data import Sampler
 
 class ModalityBatchSampler(Sampler):
     """
-    连续学习专属的异构数据采样器。
-    它会自动将数据按模态分组，确保每个 Batch 内部的物理维度绝对一致，
-    同时在 Batch 级别打乱顺序，实现平滑的经验回放 (Experience Replay)。
+    Continual-learning sampler for heterogeneous modalities.
+    Groups indices by modality so each batch has consistent feature dims;
+    shuffles batches for smooth experience replay.
     """
     def __init__(self, dataset, batch_size, shuffle=True):
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
         
-        # 预先将索引按模态进行物理隔离
+        # Partition indices by modality
         self.mod_indices = {}
         for idx in range(len(dataset)):
             is_buffer = idx >= len(dataset.native_dataset)
@@ -49,13 +49,13 @@ class ModalityBatchSampler(Sampler):
         for mod, indices in self.mod_indices.items():
             if self.shuffle:
                 random.shuffle(indices)
-            # 划分 Batch (自动实现 drop_last=True)
+            # Form full batches (implicit drop_last)
             for i in range(0, len(indices), self.batch_size):
                 batch = indices[i:i + self.batch_size]
                 if len(batch) == self.batch_size:
                     batches.append(batch)
         
-        # 打乱所有 Batch 的顺序，使得模型交替学习当前任务和历史缓冲
+        # Shuffle batches to mix current task and replay buffer
         if self.shuffle:
             random.shuffle(batches)
             
@@ -65,7 +65,7 @@ class ModalityBatchSampler(Sampler):
         return sum(len(indices) // self.batch_size for indices in self.mod_indices.values())
 
 # =====================================================================
-# 🌟 阶段 1: MAE 预训练与教师蒸馏 (MedCoSS 训练引擎)
+# Stage 1: MAE pretrain + teacher distillation
 # =====================================================================
 def train_medcoss_epoch(model, teacher_model, dataloader, optimizer, scaler, device, args, current_mod):
     model.train()
@@ -79,24 +79,24 @@ def train_medcoss_epoch(model, teacher_model, dataloader, optimizer, scaler, dev
             batch_modality = batch_modality[0]
         is_past_task = (batch_modality != current_mod)
         
-        # 🌟 核心修复：在进行任何数学运算前，统一将数据推入显存
+        # Move data to GPU before any math
         x_data = batch['data'].to(device)
         
         with torch.amp.autocast('cuda'):
-            # [A] 历史任务：特征蒸馏 + IMM (Intra-Modal MixUp)
+            # [A] Past task: feature distillation + IMM
             if is_past_task and teacher_model is not None:
-                # IMM: 与打乱的数据进行插值
+                # IMM: mix with permuted batch
                 N = x_data.size(0)
-                # 顺手把随机索引也分配到 GPU，避免索引时的跨设备拷贝
+                # Keep perm on GPU to avoid cross-device indexing
                 perm = torch.randperm(N, device=device) 
                 lambda_val = torch.rand(N, 1, 1, device=device)
                 
-                # 此时所有的张量都在 cuda:0 上，计算极其安全且迅速
+                # All tensors on same device
                 mixed_data = lambda_val * x_data + (1 - lambda_val) * x_data[perm]
                 
                 input_dict = {'data': mixed_data, 'modality': batch_modality}
                 
-                # 获取学生和老师的隐层特征
+                # Student/teacher hidden features
                 feat_s, noise = model(input_dict, mask_ratio=args.mask_ratio, feature=True)
                 with torch.no_grad():
                     feat_t, _ = teacher_model(input_dict, mask_ratio=args.mask_ratio, feature=True, noise=noise)
@@ -104,7 +104,7 @@ def train_medcoss_epoch(model, teacher_model, dataloader, optimizer, scaler, dev
                 loss = ((feat_t.detach() - feat_s) ** 2).mean() * args.lambda_distill
                 total_distill += loss.item()
                 
-            # [B] 当前任务：MAE 掩码重建预训练
+            # [B] Current task: MAE masked reconstruction
             else:
                 input_dict = {'data': x_data, 'modality': current_mod}
                 (loss, _), _, _, _ = model(input_dict, mask_ratio=args.mask_ratio)
@@ -119,28 +119,28 @@ def train_medcoss_epoch(model, teacher_model, dataloader, optimizer, scaler, dev
     return total_loss / n, total_mae / max(1, n), total_distill / max(1, n)
 
 # =====================================================================
-# 🌟 阶段 2: K-Means 核心集提取引擎
+# Stage 2: K-Means buffer extraction
 # =====================================================================
 
 def extract_kmeans_buffer(model, native_dataset, device, current_mod, args, fold):
-    print(f"      [Buffer] 正在为 {current_mod.upper()} 提取 K-Means 核心集...")
+    print(f"      [Buffer] Extracting K-Means core set for {current_mod.upper()}...")
     model.eval()
     all_features = []
     sample_indices = []
     
-    # 🌟 修复 2：使用临时顺序加载器，绝对禁止 Shuffle，追踪真实的绝对索引
+    # Sequential loader, no shuffle; track absolute dataset indices
     temp_loader = DataLoader(native_dataset, batch_size=args.batch_size, shuffle=False)
     
     with torch.no_grad(), torch.amp.autocast('cuda'):
         for idx_batch, raw_batch in enumerate(temp_loader):
-            # 直接从底层字典提取所需模态，不经过 Buffer_Dataset
+            # Read modality from native dict batch
             x = raw_batch[current_mod].to(device)
             input_dict = {'data': x, 'modality': current_mod}
             
             features, _ = model(input_dict, mask_ratio=0.0, feature=True)
             all_features.append(features.mean(1).cpu().numpy())
             
-            # 计算这批特征在原生数据集中的绝对索引 [0, 1, 2... N]
+            # Absolute indices in native dataset
             start_idx = idx_batch * args.batch_size
             batch_indices = list(range(start_idx, start_idx + x.size(0)))
             sample_indices.extend(batch_indices)
@@ -165,18 +165,18 @@ def extract_kmeans_buffer(model, native_dataset, device, current_mod, args, fold
         top_k_local = cluster_distances.argsort()[:samples_per_center]
         buffer_indices.extend(cluster_dataset_indices[top_k_local].tolist())
         
-    # 🌟 修复 3：写入带隔离后缀的文件名
+    # Buffer JSON with fold/seed suffix
     buffer_path = os.path.join(args.save_dir, f"{current_mod}_buffer_seed{args.seed}_fold{fold}.json")
     with open(buffer_path, 'w') as f:
         json.dump({"buffer_indices": buffer_indices}, f)
-    print(f"      [Buffer] 已保存 {len(buffer_indices)} 个特征锚点至 {os.path.basename(buffer_path)}。")
+    print(f"      [Buffer] Saved {len(buffer_indices)} anchor indices to {os.path.basename(buffer_path)}.")
 
 
 # =====================================================================
-# 🌟 阶段 3: 线性探测评估引擎 (Linear Probe)
+# Stage 3: linear probe evaluation
 # =====================================================================
 def evaluate_linear_probe(encoder, eval_mod, eval_dataset, device, args):
-    """冻结 Backbone，仅训练一个分类头进行评估"""
+    """Freeze backbone; train linear head only."""
     encoder.eval()
     for p in encoder.parameters(): p.requires_grad = False
         
@@ -184,8 +184,8 @@ def evaluate_linear_probe(encoder, eval_mod, eval_dataset, device, args):
     optimizer = optim.AdamW(head.parameters(), lr=1e-3, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss()
     
-    # 我们用 Eval Dataset 做极简的自监督 Probe（仅为验证表征质量）
-    # 在标准的 Linear Probe 中，通常会划分一个极小的子集，这里我们直接用它本身跑 10 轮
+    # Minimal probe on eval set to check representation quality
+    # Standard practice uses a small subset; here we train 10 epochs on full eval set
     loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=True)
     
     for ep in range(10):
@@ -196,7 +196,7 @@ def evaluate_linear_probe(encoder, eval_mod, eval_dataset, device, args):
             
             with torch.no_grad(), torch.amp.autocast('cuda'):
                 feats, _ = encoder(input_dict, mask_ratio=0.0, feature=True)
-                cls_feat = feats[:, 0, :] # 取 CLS Token
+                cls_feat = feats[:, 0, :]  # CLS token
                 
             logits = head(cls_feat)
             loss = criterion(logits, y)
@@ -205,7 +205,7 @@ def evaluate_linear_probe(encoder, eval_mod, eval_dataset, device, args):
             loss.backward()
             optimizer.step()
             
-    # 正式推理
+    # Inference
     head.eval()
     all_preds, all_labels = [], []
     with torch.no_grad():
@@ -217,13 +217,13 @@ def evaluate_linear_probe(encoder, eval_mod, eval_dataset, device, args):
             all_preds.extend(logits.argmax(dim=1).cpu().numpy())
             all_labels.extend(y)
             
-    # 清理现场，恢复需要梯度的状态以便后续 MAE
+    # Restore requires_grad for later MAE training
     for p in encoder.parameters(): p.requires_grad = True
     return f1_score(all_labels, all_preds, average='macro') * 100.0
 
 
 # =====================================================================
-# 🌟 终极总控流水线
+# Main MedCoSS pipeline
 # =====================================================================
 def get_all_subjects(data_root):
     import glob
@@ -236,15 +236,15 @@ def main():
     parser.add_argument('--order', type=str, default="linear,angular,grf")
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--epochs', type=int, default=80) # MAE 通常需要更长的轮数
+    parser.add_argument('--epochs', type=int, default=80)  # MAE needs more epochs
     parser.add_argument('--mask_ratio', type=float, default=0.75)
     
-    # Buffer 与 蒸馏参数
+    # Buffer and distillation
     parser.add_argument('--buffer_ratio', type=float, default=0.1)
     parser.add_argument('--num_centers', type=int, default=10)
     parser.add_argument('--lambda_distill', type=float, default=2.0)
     
-    # 物理参数
+    # Windowing
     parser.add_argument('--window_size', type=int, default=256)
     parser.add_argument('--step_size', type=int, default=64)
     parser.add_argument('--save_dir', type=str, default="./logs_fbg_ablations/medcoss/medcoss_logs")
@@ -271,11 +271,11 @@ def main():
             batch_size=args.batch_size, window_size=args.window_size, step_size=args.step_size
         )
         
-        # 剥离出底层的 Dataset 供 Buffer_Dataset 使用
+        # Native datasets for Buffer_Dataset
         native_train_dataset = native_train_loader.dataset
         native_test_dataset = native_test_loader.dataset
 
-        # 初始化双模型
+        # Student (+ teacher when needed)
         student = FBG_Unified_Model(is_teacher=False).to(device)
         teacher = None
         
@@ -283,7 +283,7 @@ def main():
         for task_idx, current_mod in enumerate(tasks):
             print(f"\n  >>> Task {task_idx}: MedCoSS Learning [{current_mod.upper()}] <<<")
             
-            # 1. 构建带有 Buffer 机制的数据集 (如果是 T0，则 past_tasks 为空，不加载 JSON)
+            # 1. Dataset with replay buffer (T0: empty past_tasks)
             dataset = FBG_Buffer_Dataset(
                 target_modality=current_mod, 
                 native_dataset=native_train_dataset,
@@ -293,24 +293,24 @@ def main():
                 fold=fold
             )
             
-            # 🌟 修复：加载异构物理隔离采样器
+            # Modality-isolated batch sampler
             sampler = ModalityBatchSampler(dataset, args.batch_size, shuffle=True)
             
-            # 注意：使用了 batch_sampler 后，必须移除 batch_size, shuffle, drop_last 参数
+            # With batch_sampler, omit batch_size/shuffle/drop_last
             dataloader = DataLoader(
                 dataset, 
                 batch_sampler=sampler, 
                 num_workers=4,        
                 pin_memory=True       
             )
-            # 2. 准备 Teacher
+            # 2. Teacher model
             if task_idx > 0:
                 teacher = FBG_Unified_Model(is_teacher=True).to(device)
                 teacher.load_state_dict(student.state_dict(), strict=False)
                 teacher.eval()
                 for p in teacher.parameters(): p.requires_grad = False
                 
-            # 3. 训练循环 (MAE + Distillation)
+            # 3. MAE + distillation loop
             optimizer = optim.AdamW(student.parameters(), lr=1e-3, weight_decay=0.05)
             scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
             
@@ -320,19 +320,19 @@ def main():
                 if ep <= 10 or ep % 5 == 0:
                     print(f"      [Ep {ep:03d}] Loss: {t_loss:.4f} | MAE: {t_mae:.4f} | Distill: {t_dis:.4f}", flush=True)
             
-            # 4. 提取并保存当前任务的 K-Means Buffer
+            # 4. K-Means buffer for current task
             extract_kmeans_buffer(student, native_train_dataset, device, current_mod, args, fold)
             
             seen_tasks.append(current_mod)
             
-            # 5. 线性探测评估 (Linear Probe)
+            # 5. Linear probe eval
             print(f"\n      --- Linear Probe Evaluation (Post-{current_mod.upper()}) ---")
             for j, eval_mod in enumerate(seen_tasks):
                 eval_dataset = FBG_Buffer_Dataset(
                     target_modality=eval_mod, 
                     native_dataset=native_test_dataset, 
                     buffer_json_dir=None, past_tasks=None,
-                    seed=args.seed, fold=fold  # 👈 新增
+                    seed=args.seed, fold=fold
                 )
                 f1_score_j = evaluate_linear_probe(student, eval_mod, eval_dataset, device, args)
                 R_matrix[fold, task_idx, j] = f1_score_j

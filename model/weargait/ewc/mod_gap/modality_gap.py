@@ -10,36 +10,36 @@ from sklearn.decomposition import TruncatedSVD
 import torch.nn.functional as F
 
 # ============================================================
-# 1. 绝对对称方差计算引擎
+# 1. Symmetric variance computation engine
 # ============================================================
 # ============================================================
-# 1. 绝对对称的 两两对比计算引擎 (Pairwise Analysis)
+# 1. Symmetric pairwise comparison engine
 # ============================================================
 def compute_trimodal_analysis(feat_rgb, feat_depth, feat_ir):
     f_r, f_d, f_i = feat_rgb.detach(), feat_depth.detach(), feat_ir.detach()
     
-    # --- 1. 计算方差 (Variances) ---
+    # --- 1. Compute variances ---
     var_r = f_r.var(dim=0).mean().item()
     var_d = f_d.var(dim=0).mean().item()
     var_i = f_i.var(dim=0).mean().item()
     
-    # 对称方差比例 (Max / Min)
+    # Symmetric variance ratio (Max / Min)
     ratio_rd = max(var_r, var_d) / min(var_r, var_d) if min(var_r, var_d) != 0 else 0
     ratio_ri = max(var_r, var_i) / min(var_r, var_i) if min(var_r, var_i) != 0 else 0
     ratio_di = max(var_d, var_i) / min(var_d, var_i) if min(var_d, var_i) != 0 else 0
 
-    # --- 2. 计算 Modality Gap (Centroid L2 Distance) ---
-    # 计算 Gap 必须先进行 L2 归一化，把特征映射到单位球面上
+    # --- 2. Compute modality gap (centroid L2 distance) ---
+    # L2-normalize features onto the unit sphere before computing gap
     norm_r = F.normalize(f_r, p=2, dim=1)
     norm_d = F.normalize(f_d, p=2, dim=1)
     norm_i = F.normalize(f_i, p=2, dim=1)
     
-    # 找寻各自模态的中心点 (Centroids)
+    # Compute per-modality centroids
     centroid_r = norm_r.mean(dim=0)
     centroid_d = norm_d.mean(dim=0)
     centroid_i = norm_i.mean(dim=0)
     
-    # 计算中心点之间的欧几里得距离 (L2 Norm)
+    # Euclidean distance between centroids (L2 norm)
     gap_rd = torch.norm(centroid_r - centroid_d, p=2).item()
     gap_ri = torch.norm(centroid_r - centroid_i, p=2).item()
     gap_di = torch.norm(centroid_d - centroid_i, p=2).item()
@@ -59,16 +59,16 @@ def compute_trimodal_analysis(feat_rgb, feat_depth, feat_ir):
     return
 
 # ============================================================
-# 2. 视频同步抽帧函数
+# 2. Synchronized video frame sampling
 # ============================================================
 def extract_tensor_from_frame(frame, transform):
-    """将 OpenCV 的 BGR 帧转换为 ResNet 需要的 RGB Tensor"""
+    """Convert OpenCV BGR frames to RGB tensors for ResNet"""
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     img_pil = Image.fromarray(frame_rgb)
     return transform(img_pil).unsqueeze(0)
 
 # ============================================================
-# 3. 核心主函数
+# 3. Main entry point
 # ============================================================
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -87,7 +87,7 @@ def main():
     from model.paths import DRIVE_ACT_DATA, as_str
     data_dir = as_str(DRIVE_ACT_DATA / "sub1") 
     
-    # 👑 这一次，我们专门去抓取 .mp4 文件！忽略 .timestamps
+    # 👑 Collect .mp4 files only; ignore .timestamps
     color_videos = sorted(glob.glob(os.path.join(data_dir, '**/*color.mp4'), recursive=True))
 
     if not color_videos:
@@ -97,10 +97,10 @@ def main():
     print(f"🎥 Found {len(color_videos)} Color video files. Starting synchronous extraction...")
 
     # ==========================================
-    # 👑 稀疏采样策略
+    # 👑 Sparse sampling strategy
     # ==========================================
-    frame_step = 30     # 每隔 30 帧（大约1秒）抽一次，保证动作多样性
-    max_samples = 100   # 抽满 100 个配对样本就停止
+    frame_step = 30     # Sample every 30 frames (~1s) for motion diversity
+    max_samples = 100   # Stop after 100 paired samples
     
     rgb_features, depth_features, ir_features = [], [], []
     valid_count = 0
@@ -108,7 +108,7 @@ def main():
     for color_path in color_videos:
         if valid_count >= max_samples: break
         
-        # 寻找对应的 depth 和 ir 视频
+        # Locate paired depth and IR videos
         depth_path = color_path.replace('color', 'depth')
         ir_path = color_path.replace('color', 'ir')
 
@@ -116,7 +116,7 @@ def main():
             print(f"   ⚠️ 找不到配对的 Depth/IR 视频，跳过: {os.path.basename(color_path)}")
             continue
 
-        # 同步打开三个视频
+        # Open three videos synchronously
         cap_c = cv2.VideoCapture(color_path)
         cap_d = cv2.VideoCapture(depth_path)
         cap_i = cv2.VideoCapture(ir_path)
@@ -127,11 +127,11 @@ def main():
             ret_d, frame_d = cap_d.read()
             ret_i, frame_i = cap_i.read()
 
-            # 如果任何一个视频结束了，就跳出当前视频的循环
+            # Break if any video stream ends
             if not (ret_c and ret_d and ret_i):
                 break
             
-            # 只有当达到我们设定的 frame_step 时，才提取特征
+            # Extract features only at frame_step intervals
             if frame_idx % frame_step == 0:
                 img_c = extract_tensor_from_frame(frame_c, transform_vision).to(device)
                 img_d = extract_tensor_from_frame(frame_d, transform_vision).to(device)
@@ -155,13 +155,13 @@ def main():
             
             frame_idx += 1
 
-        # 释放视频流资源
+        # Release video capture resources
         cap_c.release()
         cap_d.release()
         cap_i.release()
 
     # ==========================================
-    # 3. 联合 SVD 降维 (Fair Comparison Protocol)
+    # 3. Joint SVD reduction (fair comparison protocol)
     # ==========================================
     if valid_count > 10:
         all_rgb = torch.cat(rgb_features)

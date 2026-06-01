@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score
 import numpy as np
 
-# --- 导入核心组件 ---
+# --- Core imports ---
 import utility as U
 from encoder import WearGaitUniversal
 from data_loader import (
@@ -22,13 +22,13 @@ CACHE_DIR = FOG_CACHE
 CHECKPOINT_DIR = Path("./checkpoints")
 
 MODALITY_CONFIG = {
-    "acc":      {"lr": 1e-4, "weight_decay": 2e-2}, # 从 1e-2 提升至 2e-2
+    "acc":      {"lr": 1e-4, "weight_decay": 2e-2}, # raised from 1e-2 to 2e-2
     "gyr":      {"lr": 1e-4, "weight_decay": 2e-2},
-    "skeleton": {"lr": 1e-4, "weight_decay": 5e-2}  # 骨架数据极易过拟合，施加 5e-2 的重度惩罚
+    "skeleton": {"lr": 1e-4, "weight_decay": 5e-2}  # heavy 5e-2 WD for skeleton overfitting
 }
 
 # ==========================================
-# 1. 核心损失引擎 (Loss Engine)
+# 1. Loss engine
 # ==========================================
 class LossEngine:
     def __init__(self, ewc, teacher_model, args, device):
@@ -62,7 +62,7 @@ class LossEngine:
                 if self.kd_lambda > 0:
                     t_logits = self.teacher_model.shared_head(t_z)
 
-            # A. 语义知识蒸馏
+            # A. Semantic knowledge distillation
             if self.kd_lambda > 0:
                 T = 2.0
                 p_s = F.log_softmax(logits / T, dim=1)
@@ -70,7 +70,7 @@ class LossEngine:
                 raw_kd = F.kl_div(p_s, p_t, reduction='batchmean') * (T**2)
                 weighted_kd = self.kd_lambda * raw_kd
 
-            # B. 物理流形排斥
+            # B. Repulsive manifold loss
             if self.repulsive_alpha > 0:
                 cos_sim = F.cosine_similarity(z, t_z, dim=1)
                 raw_repulsion = F.relu(cos_sim - self.repulsive_margin).mean()
@@ -90,7 +90,7 @@ class LossEngine:
         return total_loss, metrics
 
 # ==========================================
-# 2. 状态控制 (State Management)
+# 2. State management
 # ==========================================
 def register_shared_ewc(model, ewc, dataloader, num_batches, task_id):
     set_active_task_and_freeze(model, task_id)
@@ -117,7 +117,7 @@ def unfreeze_shared_components(model, mod):
     for p in model.encoders[mod].parameters():   p.requires_grad = True
 
 # ==========================================
-# 3. 训练核心循环 (Training Logic)
+# 3. Training loop
 # ==========================================
 def run_warmup_phase(args, model, train_loader, val_loader, device, mod, task_id, mod_cfg):
     warmup_ep = args.kd_we
@@ -200,7 +200,7 @@ def train_one_task(args, model, ewc, train_loader, val_loaders_dict, tasks_list,
     for ep in range(1, args.epochs+1):
         t = ep / args.epochs 
         
-        # 🚨 核心修复 3：统一且正确的 Curriculum 调度
+        # 🚨 Fix 3: unified curriculum schedule
         if task_id > 0:
             if base_rep_alpha > 0.0 and not getattr(args, 'disable_curriculum', False):
                 loss_engine.repulsive_alpha = base_rep_alpha * (t ** args.p_degree)
@@ -264,7 +264,7 @@ def train_one_task(args, model, ewc, train_loader, val_loaders_dict, tasks_list,
             
         stop_signal = early_stopper(current_val_f1, model)
         
-        # 🚨 核心修复 4：使用正统的 50% 保护期锁定 Early Stopping
+        # 🚨 Fix 4: early stopping with 50% protection
         lockout_horizon = int(0.5 * args.epochs) if (getattr(args, 'disable_curriculum', False) or base_rep_alpha == 0.0) else int((0.5 ** (1.0 / args.p_degree)) * args.epochs)
         curriculum_active = (task_id > 0) and (ep <= lockout_horizon) and (getattr(args, 'kd_lambda', 0.0) > 0) and (base_rep_alpha > 0.0)
         
@@ -279,7 +279,7 @@ def train_one_task(args, model, ewc, train_loader, val_loaders_dict, tasks_list,
     if early_stopper.best_model_state: model.load_state_dict(early_stopper.best_model_state)
 
 # ==========================================
-# 4. 主控与交叉验证 (Cross Validation & Pipeline)
+# 4. Main CV pipeline
 # ==========================================
 def run_cv_with_cache(args, data_cache):
     json_path = CACHE_DIR / "subj2label.json"
@@ -317,15 +317,15 @@ def run_cv_with_cache(args, data_cache):
 
             seen_val_loaders = {m: eval_loader_cache[fi][m] for m in seen + [mod]}
             
-            # 🚨 核心修复 2：复刻外科手术级优化器动量注入
-            # 🚨 终极架构修复：动态 Weight Decay 拦截器 (Protect EWC)
+            # 🚨 Fix 2: optimizer momentum injection
+            # 🚨 Dynamic weight-decay guard (protect EWC)
             if args.mode == 'cl':
-                # 读取基础配置
+                # Read base config
                 current_wd = mod_cfg["weight_decay"]
                 
-                # 如果是后续任务，强制将 WD 归零或降至极小，防止腐蚀 EWC 保护的旧参数
+                # Zero/minimal WD on later tasks to avoid corrupting EWC-protected weights
                 if current_task_idx > 0:
-                    current_wd = 0.0   # 彻底切断 L2 正则化
+                    current_wd = 0.0   # Disable L2 regularization
                     print(f"   🛡️ [CL Defense] Task {current_task_idx} 触发! 强制关闭 Weight Decay (WD={current_wd}) 以保护历史旧知识。")
 
                 if ti == 1:
@@ -353,7 +353,7 @@ def run_cv_with_cache(args, data_cache):
                 print(f">> [CL] Registering Fisher for {mod} (Required for Overlap Analysis)...")
                 register_shared_ewc(model, ewc, tr_loader, args.fisher_batches, task_id=current_task_idx)
             
-            # 🚨 核心修复 1：动态循环获取真实矩阵重叠度
+            # 🚨 Fix 1: dynamic matrix overlap
             if getattr(args, 'analyze_overlap', False) and ti >= 2:
                 for past_task in range(current_task_idx):
                     U.analyze_fisher_cosine_similarity(ewc, task_A=past_task, task_B=current_task_idx)

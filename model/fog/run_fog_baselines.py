@@ -3,14 +3,14 @@ import subprocess
 import time
 import argparse
 
-# ================= 1. 环境与硬件配置 =================
+# ================= 1. Environment and hardware =================
 LOG_BASE = "./log/fog_baselines"
 SEEDS = [42, 43, 44, 3, 4]  
 
-# ================= 2. FOG 基础最优超参数 =================
+# ================= 2. FOG default hyperparameters =================
 BASE_ARGS = {
-    "--order": "skeleton,gyr,acc", # 🚨 最难的排第一
-    "--disable_dbn": "",           # 🚨 物理剥离 DBN (强制基线参数量对齐)
+    "--order": "skeleton,gyr,acc", # 🚨 hardest modality first
+    "--disable_dbn": "",           # 🚨 disable DBN (fair param count)
     "--num_classes": "3",   
     "--batch_size": "32",   
     "--lr": "0.0001",       
@@ -18,15 +18,15 @@ BASE_ARGS = {
     "--patience": "20",            
     "--win_len": "120",
     "--hop_len": "15",      
-    "--num_workers": "2",          # 🚨 降为 2 保护 CPU 总线
+    "--num_workers": "2",          # 🚨 2 workers to reduce CPU load
     "--n_folds": "5"
 }
 
-# ================= 3. 基线架构注册表 =================
+# ================= 3. Baseline registry =================
 BASELINES = [
     {"name": "Harmony", "script": "fog_harmony.py"}, # Index 1
     {"name": "DRMN",    "script": "fog_drmn.py"},    # Index 2
-    {"name": "LwI",     "script": "fog_lwi.py"}      # Index 3 (新增最优传输基线)
+    {"name": "LwI",     "script": "fog_lwi.py"}      # Index 3 (OT fusion baseline)
 ]
 
 def build_command(script_path, seed, gpu_id):
@@ -46,7 +46,7 @@ def run_suite(target_runs=None, gpus=[0, 1]):
     active_processes = []
     global_counter = 0
 
-    # 支持命令行按序号指定运行哪几个基线 (如 -r 1 3)
+    # Select baselines by index (-r 1 3)
     experiments = [BASELINES[i-1] for i in target_runs if 0 < i <= len(BASELINES)] if target_runs else BASELINES
     if not experiments: return
 
@@ -65,7 +65,7 @@ def run_suite(target_runs=None, gpus=[0, 1]):
         os.makedirs(exp_dir, exist_ok=True)
         
         for seed in SEEDS:
-            # 严格控制 GPU 进程池水位
+            # Cap concurrent GPU jobs
             while len(active_processes) >= current_max_parallel:
                 active_processes = [p for p in active_processes if p.poll() is None]
                 time.sleep(2) 
@@ -79,9 +79,9 @@ def run_suite(target_runs=None, gpus=[0, 1]):
                 active_processes.append(p)
             
             global_counter += 1
-            time.sleep(3.0) # 错峰启动，防止瞬间 I/O 和显存峰值爆炸
+            time.sleep(3.0) # Stagger launches to avoid I/O/GPU spikes
 
-    # 等待最后一批任务收尾
+    # Wait for final batch
     for p in active_processes: p.wait()
     print("✅ FOG Baselines Suite Finished!")
 

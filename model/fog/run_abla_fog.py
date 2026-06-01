@@ -3,31 +3,31 @@ import subprocess
 import time
 import argparse
 
-# ================= 1. 环境与硬件配置 =================
+# ================= 1. Environment and hardware =================
 SCRIPT_PATH = "fog_train.py" 
 LOG_BASE = "./log/ablations/fog"
 SEEDS = [42, 43, 44, 2, 3]  
 
-# ================= 2. FOG 基础最优超参数 (STATIC) =================
-# 针对 FOG 极小样本、高噪声特性的专属参数
+# ================= 2. FOG default hyperparameters (STATIC) =================
+# FOG small-sample / noisy setting
 BASE_ARGS = {
     "--mode": "cl",
     "--order": "skeleton,gyr,acc",
-    "--batch_size": "32",   # 小 batch size，增加梯度噪声防止过拟合
-    "--lr": "0.0001",       # 配合小 batch_size 同步缩小的 LR
+    "--batch_size": "32",   # Small batch for regularization
+    "--lr": "0.0001",       # LR scaled with batch size
     "--lr_we": "10",
     "--epochs": "80",       
     "--patience": "20",            
     "--win_len": "120",
-    "--hop_len": "15",      # 密集的 hop_len 增强样本量
+    "--hop_len": "15",      # Dense hop_len for more windows
     "--num_workers": "4",
-    "--num_classes": "3",   # FOG H&Y 3分类
+    "--num_classes": "3",   # FOG H&Y 3-class
     "--kd_we": "10",
     "--fisher_batches": "16",
 }
 
-# ================= 3. 消融实验矩阵 (MODULARIZED FOR FOG) =================
-# 提取公共排斥参数
+# ================= 3. FOG ablation matrix =================
+# Shared repulsive args
 COMMON_REPUL_ARGS = {
     "--ewc_lambda": "5000.0", 
     "--kd_lambda": "1.0", 
@@ -36,26 +36,26 @@ COMMON_REPUL_ARGS = {
     "--analyze_overlap": ""
 }
 
-# --- 3.1 核心基线与组件消融 ---
+# --- 3.1 Core ablations ---
 CORE_ABLATIONS = [
-    # 0. 灾难性遗忘下限 (没有任何保护，证明旧知识会被迅速抹除)
+    # 0. Catastrophic forgetting lower bound (no protection)
     {"name": "00_Naive_Finetuning", "args": {"--disable_dbn": "", "--ewc_lambda": "0.0", "--kd_lambda": "0.0", "--repulsive_alpha": "0.0", "--analyze_overlap": ""}},
     
-    # 1. 纯 EWC (用户要求 1：只有 EWC，无 KD，基线剥离 DBN)
+    # 1. EWC only (no KD, DBN off)
     {"name": "01_Pure_EWC",         "args": {"--disable_dbn": "", "--ewc_lambda": "5000.0", "--kd_lambda": "0.0", "--repulsive_alpha": "0.0", "--analyze_overlap": ""}},
     
-    # 2. EWC + KD = LwF (用户要求 2：标准蒸馏，基线剥离 DBN)
+    # 2. EWC + KD (LwF, DBN off)
     {"name": "02_LwF",              "args": {"--disable_dbn": "", "--ewc_lambda": "5000.0", "--kd_lambda": "1.0", "--repulsive_alpha": "0.0", "--analyze_overlap": ""}},
     
-    # 3. Static Repulsive (用户要求 3：静态流形排斥，剥离课表，基线剥离 DBN)
+    # 3. Static repulsive (no curriculum, DBN off)
     {"name": "03_Static_Repulsive", "args": {"--disable_dbn": "", "--ewc_lambda": "5000.0", "--kd_lambda": "1.0", "--repulsive_alpha": "0.5", "--repulsive_margin": "0.1", "--disable_curriculum": "", "--analyze_overlap": ""}},
     
-    # 4. Ours Full (用户要求 4：终极完全体 - 包含 DBN，包含 Repulsive，包含 Curriculum)
+    # 4. Full method (DBN + repulsive + curriculum)
     {"name": "04_Ours_Full",        "args": {**COMMON_REPUL_ARGS, "--repulsive_margin": "0.1", "--p_degree": "5.0"}}
 ]
 
-# --- 3.2 简单故事线：基于 m=0.1 的 Gamma(p) 动力学消融 (Indices 6 to 11) ---
-# 用于绘制论文中的 Gamma 曲线图
+# --- 3.2 Gamma(p) ablation at m=0.1 (indices 6-11) ---
+# For paper gamma curves
 GAMMA_ABLATIONS = [
     {"name": f"06_p0.1", "args": {**COMMON_REPUL_ARGS, "--repulsive_margin": "0.1", "--p_degree": "0.1"}},
     {"name": f"07_p0.3", "args": {**COMMON_REPUL_ARGS, "--repulsive_margin": "0.1", "--p_degree": "0.3"}},
@@ -65,9 +65,9 @@ GAMMA_ABLATIONS = [
     {"name": f"11_p8.0", "args": {**COMMON_REPUL_ARGS, "--repulsive_margin": "0.1", "--p_degree": "8.0"}},
 ]
 
-# --- 3.3 简单故事线：安全截断的 Margin(m) 空间边界消融 (Indices 12 to 16) ---
-# 严格按照你的要求，截断在 0.4，不再探索会引起反常识的 0.7 区域
-M_MARGINS = [-0.2, 0.0, 0.2, 0.3, 0.4] # 0.1 已经在 05_Ours_Full 里了
+# --- 3.3 Margin(m) ablation (indices 12-16) ---
+# Margins capped at 0.4 (skip unstable 0.7 region)
+M_MARGINS = [-0.2, 0.0, 0.2, 0.3, 0.4] # 0.1 covered in 05_Ours_Full
 M_ABLATIONS = []
 for idx, m_val in enumerate(M_MARGINS, start=12):
     M_ABLATIONS.append({
@@ -75,7 +75,7 @@ for idx, m_val in enumerate(M_MARGINS, start=12):
         "args": {**COMMON_REPUL_ARGS, "--repulsive_margin": str(m_val), "--p_degree": "5.0"}
     })
 
-# --- 3.4 杂项补充测试 (Index 17) ---
+# --- 3.4 Misc test (index 17) ---
 MISC_ABLATIONS = [
     {
         "name": "17_Standard_EWC_KD_we30", 
@@ -85,15 +85,15 @@ MISC_ABLATIONS = [
             "--kd_lambda": "1.0",         
             "--repulsive_alpha": "0.0",
             "--analyze_overlap": "",
-            "--kd_we": "30" # 测试延长 Warm-up 对基线的影响
+            "--kd_we": "30" # Longer warmup ablation
         }
     }
 ]
 
-# ================= 动态合并所有实验 =================
+# ================= Merge all experiment configs =================
 ABLATIONS = CORE_ABLATIONS + GAMMA_ABLATIONS + M_ABLATIONS + MISC_ABLATIONS
 
-# ================= 4. 执行引擎 (EXECUTION ENGINE) =================
+# ================= 4. Execution engine =================
 def build_command(exp_args, seed, gpu_id, exp_name):
     cmd = ["python", "-u", SCRIPT_PATH]
     

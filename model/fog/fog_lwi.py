@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score
 import numpy as np
 
-# --- 导入 FOG 核心组件 ---
+# --- FOG core imports ---
 import utility as U
 from encoder import WearGaitUniversal
 from data_loader import (
@@ -16,15 +16,15 @@ from data_loader import (
     build_subj2label_fog, make_stratified_folds, SingleModalityDataset
 )
 
-# 导入 LwI 最优传输模块
+# LwI optimal-transport module import
 from model.baselines.LwI import optimal_transport as ot
 from model.paths import FOG_CACHE
 
-# 全局路径配置 (对接 FOG 的预处理输出)
+# Global paths (FOG preprocessing cache)
 CACHE_DIR = FOG_CACHE
 
 # ==========================================
-# LwI 配置与工具函数
+# LwI config and utilities
 # ==========================================
 class OTConfig:
     def __init__(self, args, device):
@@ -52,28 +52,28 @@ class OTConfig:
 
 def recalibrate_bn(model, loader, device, mod):
     """
-    权重经过 OT 融合后，由于底层分布改变，必须使用新数据重新校准 BN 层的运行统计量。
+    After OT fusion, recalibrate BN running statistics on the new modality data.
     """
     model.train()
     model.set_active_modality(mod)
-    # 冻结所有权重参数，仅允许 BN 层更新 running_mean 和 running_var
+    # Freeze weights; only BN running_mean/var may update
     for p in model.parameters(): 
         p.requires_grad = False
         
     print(f"   🔄 [LwI] Recalibrating Shared Batch Norm statistics using '{mod}' data...")
     with torch.no_grad():
         for i, (x, _) in enumerate(loader):
-            if i > 50: break # 50 个 batch 足够校准
+            if i > 50: break # 50 batches suffice for calibration
             x = x.to(device)
             _ = model(x) 
             
-    # 恢复梯度计算
+    # Re-enable gradients
     for p in model.parameters(): 
         p.requires_grad = True
     print("   ✅ [LwI] Recalibration Complete.")
 
 # ==========================================
-# 核心训练逻辑 (包含 Chimera KD)
+# Core training loop (with Chimera KD)
 # ==========================================
 def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_id, device):
     print(f"\n   >>> [LwI] Training '{mod}' (Task {task_id+1}) | Feat KD $\lambda$: {args.kd_lambda}")
@@ -87,7 +87,7 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
         model_old.eval()
         model_old.set_active_modality(mod)
 
-    # 仅更新当前模态的 encoder 和共享部件
+    # Train current encoder and shared modules only
     for k in model.encoders.keys():
         for p in model.encoders[k].parameters():
             p.requires_grad = (k == mod) 
@@ -101,7 +101,7 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
     mse_loss = nn.MSELoss()
     best_eval = 0.0
 
-    # LwI 的 Warmup 设定 (前 5 个 Epoch 冻结共享层，只适应 Encoder)
+    # LwI warmup: first 5 epochs freeze shared layers, adapt encoder only
     WARMUP_EPOCHS = 5
 
     for ep in range(1, args.epochs + 1):
@@ -123,7 +123,7 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
             
-            # 前向传播 (适配 WearGaitUniversal)
+            # Forward pass (WearGaitUniversal)
             features = model.encoders[mod](x)
             z_new = model.shared_backbone(features)
             logits = model.shared_head(z_new)
@@ -132,13 +132,13 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
             loss = loss_ce
             loss_kd_val = torch.tensor(0.0)
 
-            # LwI 特征级 KD (Chimera Distillation)
+            # LwI feature-level KD (Chimera distillation)
             if model_old is not None and current_lambda > 0:
                 with torch.no_grad():
                     features_old = model_old.encoders[mod](x)
                     z_old = model_old.shared_backbone(features_old)
                 
-                # 必须对特征进行 L2 归一化再算 MSE
+                # L2-normalize features before MSE
                 z_new_norm = F.normalize(z_new, p=2, dim=1)
                 z_old_norm = F.normalize(z_old, p=2, dim=1)
                 
@@ -157,7 +157,7 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
 
         scheduler.step()
 
-        # 验证评估
+        # Validation
         model.eval()
         all_preds, all_targets = [], []
         with torch.no_grad():
@@ -186,10 +186,10 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
 
 
 # ==========================================
-# 主控与交叉验证 (Cross Validation & OT Fusion)
+# Main CV loop with OT fusion
 # ==========================================
 def run_cv_lwi(args, data_cache):
-    # FOG 专用的 Json 和 subj2label
+    # FOG-specific JSON and subj2label
     json_path = CACHE_DIR / "subj2label.json"
     subj2label = build_subj2label_fog(str(json_path)) 
     folds = make_stratified_folds(subj2label, n_folds=args.n_folds, seed=args.seed)
@@ -204,7 +204,7 @@ def run_cv_lwi(args, data_cache):
     for fi in range(len(folds)):
         print(f"\n{'='*20} Fold {fi+1}/{len(folds)} {'='*20}")
         
-        # 🚨 LwI 基线必须关闭 DBN (Shared BN) 以保证参数量完全公平
+        # 🚨 Disable DBN (shared BN) for fair parameter count
         model = WearGaitUniversal(num_classes=args.num_classes, disable_dbn=True).to(device)
         model_old = None
         seen_mods = []
@@ -212,42 +212,42 @@ def run_cv_lwi(args, data_cache):
         for ti, mod in enumerate(tasks):
             print(f"\n=== LwI Task {ti+1}/{len(tasks)} : {mod} ===")
             
-            # 数据加载
+            # Data loading
             train_subs, test_subs = folds[fi]
             prep = prepare_split(train_subs, test_subs, data_cache=data_cache, win=args.win_len, hop=args.hop_len, modalities=(mod,))
             tr_sync, te_sync = make_sync_loaders(prep, subj2label, batch_size=args.batch_size, num_workers=args.num_workers)
             
-            # 使用包装器转换为单一模态 Dataset
+            # Wrap as single-modality dataset
             tr_loader = DataLoader(SingleModalityDataset(tr_sync.dataset, mod_index=0), batch_size=args.batch_size, shuffle=True, num_workers=0)
             te_loader = DataLoader(SingleModalityDataset(te_sync.dataset, mod_index=0), batch_size=args.batch_size, shuffle=False, num_workers=0)
             eval_loader_cache[fi][mod] = te_loader 
 
-            # 1. 训练当前任务
+            # 1. Train current task
             train_lwi_task(args, model, model_old, tr_loader, te_loader, mod, ti, device)
 
-            # 2. 核心：执行 OT 权重融合 (仅在任务 > 1 时)
+            # 2. OT weight fusion when task index > 1
             if model_old is not None:
                 print("\n   🧬 [LwI] Performing Optimal Transport (OT) Weight Fusion...")
-                # ignore_keyword 'encoders' 确保只融合 shared_backbone 和 shared_head
+                # ignore_keyword 'encoders' fuses shared_backbone and shared_head only
                 fused_dict = ot.get_wassersteinized_layers_modularized(
                     ot_config, device, networks=[model_old, model], ignore_keyword='encoders'
                 )
                 
-                # 注入融合后的权重
+                # Load fused weights
                 current_state = model.state_dict()
                 for layer_name, new_weight in fused_dict.items():
                     if layer_name in current_state:
                         current_state[layer_name].copy_(new_weight)
                 model.load_state_dict(current_state)
                 
-                # 3. 重新校准 BN
+                # 3. Recalibrate BN
                 recalibrate_bn(model, tr_loader, device, mod)
 
-            # 更新旧模型
+            # Update teacher model
             model_old = copy.deepcopy(model)
             model_old.eval()
 
-            # 4. 评估所有已学模态
+            # 4. Evaluate all learned modalities
             seen_mods.append(mod)
             print(f"\n--- Evaluation (Step {ti+1}) ---")
             scores = []
@@ -285,19 +285,19 @@ def run_cv_lwi(args, data_cache):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cuda")
-    # FOG 三大模态
+    # FOG three modalities
     ap.add_argument("--order", type=str, default="acc,gyr,skeleton")
     
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--n_folds", type=int, default=5)
-    ap.add_argument("--batch_size", type=int, default=16) # 与 FOG 对齐的 batch size
+    ap.add_argument("--batch_size", type=int, default=16) # FOG-aligned batch size
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--epochs", type=int, default=80)     # 与 FOG 对齐的 epochs
+    ap.add_argument("--epochs", type=int, default=80)     # FOG-aligned epochs
     ap.add_argument("--patience", type=int, default=20)
     ap.add_argument("--win_len", type=int, default=120)
     ap.add_argument("--hop_len", type=int, default=15)
     ap.add_argument("--num_workers", type=int, default=4)
-    ap.add_argument("--num_classes", type=int, default=3) # FOG (H&Y 3分类)
+    ap.add_argument("--num_classes", type=int, default=3) # FOG (H&Y 3-class)
     ap.add_argument("--disable_dbn", action='store_true')
 
     # LwI (OT) Specific Arguments

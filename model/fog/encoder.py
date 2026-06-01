@@ -5,17 +5,17 @@ import torch.nn.functional as F
 from torch.nn import Parameter
 import math
         
-WIDTH = 128       # 适度拓宽流形带宽
+WIDTH = 128       # Wider manifold capacity
 POOL_SIZE = 1     
 
 class ResBlock1D(nn.Module):
     """
     Standard Residual Block for Time-Series (Large Kernel Enabled).
-    具备连续学习多任务 Batch Normalization 路由机制。
+    Multi-task BN routing for continual learning.
     """
     def __init__(self, in_channels, out_channels, kernel_size=7, stride=1, dilation=1, num_tasks=3):
         super().__init__()
-        # 严格的 Padding 物理对齐，确保因果序列或等长序列不崩塌
+        # Strict padding for causal/equal-length sequences
         padding = (kernel_size - 1) * dilation // 2
         
         self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, dilation=dilation, bias=False)
@@ -45,9 +45,9 @@ class ResBlock1D(nn.Module):
 
 class KinematicEncoder(nn.Module):
     """
-    通用物理运动学编码器，适用于 Accelerometer 和 Gyroscope。
-    输入通道: 3
-    感受野: k=15 (在 30Hz 下覆盖 0.5s 的局部步态动力学)
+    Kinematic encoder for acc/gyro.
+    Input channels: 3
+    Receptive field k=15 (~0.5s at 30Hz)
     """
     def __init__(self, in_channels=3, out_channels=WIDTH):
         super().__init__()
@@ -63,31 +63,31 @@ class KinematicEncoder(nn.Module):
 
 class SkeletonEncoder(nn.Module):
     """
-    FOG 专用的抗体型过拟合骨架编码器。
-    通过内部强制计算帧间速度 (Velocity)，彻底抹除身高等静态生物特征，
-    逼迫网络只能学习“运动和震颤”。
+    FOG skeleton encoder (anti anthropometric overfitting).
+    Uses frame velocity to remove static anthropometric cues,
+    forcing motion/tremor features.
     """
     def __init__(self, in_channels=21, out_channels=WIDTH):
         super().__init__()
-        # 骨架的动态特征非常微弱，扩大感受野到 15 (0.5秒)，并加入极强的通道级 Dropout
+        # Weak skeleton signal: RF=15 (0.5s) and strong channel dropout
         self.stem = nn.Sequential(
             nn.Conv1d(in_channels, out_channels, kernel_size=15, padding=7, bias=False),
             nn.BatchNorm1d(out_channels),
             nn.GELU(),
-            nn.Dropout1d(p=0.5) # 在最底层直接随机切断 50% 的神经元，防止协同记忆
+            nn.Dropout1d(p=0.5) # 50% dropout at bottom to block co-adaptation
         )
 
     def forward(self, x):
-        # x 的维度: (Batch, 21, Time)
+        # x shape: (B, 21, T)
         
-        # 🚨 核弹级特征工程：计算一阶时间差分 (Velocity)
-        # 这会将绝对坐标 [x_t, y_t] 变为相对运动量 [Δx, Δy]
-        # 身高、腿长等静态常量在差分后全部归零！
+        # 🚨 First-order temporal difference (velocity)
+        # Maps absolute coords to deltas
+        # Static traits vanish after differencing
         velocity = torch.zeros_like(x)
         velocity[:, :, 1:] = x[:, :, 1:] - x[:, :, :-1]
         
-        # 将原坐标微弱保留（除以 100 压制其权重），与速度特征相加
-        # 这样网络 99% 的注意力被迫集中在运动速度（震颤）上
+        # Keep scaled position + velocity
+        # Focuses capacity on motion/tremor
         x_dynamic = velocity + (x * 0.01)
         
         return self.stem(x_dynamic)
@@ -97,8 +97,8 @@ class SkeletonEncoder(nn.Module):
 class UniversalBackbone(nn.Module):
     def __init__(self, channels=WIDTH, pool_size=POOL_SIZE):
         super().__init__()
-        # K=7 配合指数空洞率：在 3 层内达到 Receptive Field = 127
-        # 严格防御过拟合，同时保障长程马尔可夫依赖
+        # K=7 dilated conv: RF=127 in 3 layers
+        # Anti-overfit with long-range dependency
         dilations = [1, 4, 16]
         
         self.blocks = nn.ModuleList([
@@ -138,7 +138,7 @@ class CosineLinear(nn.Module):
 class TaskHead(nn.Module):
     def __init__(self, input_dim=WIDTH*POOL_SIZE, num_classes=3):
         super().__init__()
-        # 加入 50% 的 Dropout 强行截断过拟合路径
+        # 50% dropout blocks overfitting paths
         self.dropout = nn.Dropout(p=0.5) 
         self.fc = CosineLinear(input_dim, num_classes)
         
@@ -148,14 +148,14 @@ class TaskHead(nn.Module):
 
 class WearGaitUniversal(nn.Module):
     """
-    Modality-Incremental Continual Learning (MICL) 主力网络架构。
-    模块字典已更新为适配 FOG 物理隔离的三大模态流形。
+    MICL backbone network.
+    Encoder dict for FOG three isolated modalities.
     """
     def __init__(self, num_classes=3, disable_dbn=False):
         super().__init__()
         self.disable_dbn = disable_dbn
         
-        # 核心修改：移除原有的步道与鞋垫模块，替换为 FOG 的三大基础物理源
+        # Replaced walkway/insole with FOG acc/gyr/skeleton
         self.encoders = nn.ModuleDict({
             "acc":      KinematicEncoder(in_channels=3, out_channels=WIDTH),
             "gyr":      KinematicEncoder(in_channels=3, out_channels=WIDTH),

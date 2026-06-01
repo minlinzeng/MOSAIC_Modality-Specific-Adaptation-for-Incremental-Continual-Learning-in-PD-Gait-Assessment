@@ -8,17 +8,17 @@ import numpy as np
 from sklearn.metrics import f1_score
 from sklearn.model_selection import KFold
 
-# --- 导入 FBG 资产 ---
+# --- FBG imports ---
 from data_loader import get_fbg_dataloaders
 from encoder import ResBlock1D, MICL_CNN_PD_Model  
 from fbg_utility import set_deterministic_seed, EarlyStopping
 from model.paths import FBG_PROCESSED, as_str
 
 # =====================================================================
-# 🌟 1. FBG 架构适配器 (Harmony Wrapper)
+# 1. FBG architecture adapter (Harmony wrapper)
 # =====================================================================
 class FBGEncoderWrapper(nn.Module):
-    """提取单个模态的前端和 Dropout"""
+    """Single-modality encoder front-end and dropout."""
     def __init__(self, encoder, input_drop):
         super().__init__()
         self.encoder = encoder
@@ -28,24 +28,24 @@ class FBGEncoderWrapper(nn.Module):
         return self.encoder(self.input_drop(x.permute(0, 2, 1)))
 
 class FBGSharedBackbone(nn.Module):
-    """封装残差块，屏蔽 current_task 参数 (因为 Harmony 是基于历史特征聚合，不是 MSBN)"""
+    """Residual blocks; task_id fixed to 0 (Harmony aggregates history, not MSBN)."""
     def __init__(self, res1, res2, res3):
         super().__init__()
         self.res1 = res1
         self.res2 = res2
         self.res3 = res3
     def forward(self, x):
-        # Harmony 基线不使用 MSBN，所以 task_id 固定传 0
+        # Harmony baseline: no MSBN; task_id always 0
         x = self.res1(x, task_id=0)
         x = self.res2(x, task_id=0)
         x = self.res3(x, task_id=0)
         return torch.mean(x, dim=2) # Pooled output (B, 32)
 
 class FBGSharedHead(nn.Module):
-    """封装分类头和噪声"""
+    """Classification head and training noise."""
     def __init__(self, head, dropout, noise_std):
         super().__init__()
-        # Harmony 原代码提取权重是 model.shared_head.fc.weight，所以我们包一层 fc
+        # Harmony expects shared_head.fc; wrap head as fc
         self.fc = head 
         self.dropout = dropout
         self.noise_std = noise_std
@@ -57,15 +57,15 @@ class FBGSharedHead(nn.Module):
 
 class HarmonyFBGModel(nn.Module):
     """
-    将 MICL_CNN_PD_Model 拆解组装成 Harmony 期待的接口格式。
-    !!! 注意: 基线必须禁用 MSBN !!!
+    Split MICL_CNN_PD_Model into Harmony's expected interface.
+    Baseline must disable MSBN.
     """
     def __init__(self, d_model=64, num_tasks=3, dropout=0.3):
         super().__init__()
-        # 实例化底层模型 (强制禁用 MSBN，作为纯净基线)
+        # Base model with MSBN disabled (clean baseline)
         self.base_model = MICL_CNN_PD_Model(d_model=d_model, num_tasks=num_tasks, dropout=dropout, disable_msbn=True)
         
-        # 组装 Harmony 接口
+        # Harmony interface assembly
         self.encoders = nn.ModuleDict({
             'linear': FBGEncoderWrapper(self.base_model.enc_lin, self.base_model.input_drop),
             'angular': FBGEncoderWrapper(self.base_model.enc_ang, self.base_model.input_drop),
@@ -75,20 +75,20 @@ class HarmonyFBGModel(nn.Module):
         self.shared_backbone = FBGSharedBackbone(self.base_model.res1, self.base_model.res2, self.base_model.res3)
         self.shared_head = FBGSharedHead(self.base_model.head, self.base_model.dropout, self.base_model.noise_std)
         
-        # 这些将在 run_cv_harmony 中动态注入
+        # Injected dynamically in run_cv_harmony
         self.acfm = None
         self.cka = None
 
     def set_active_task(self, task_idx):
-        # 兼容 WearGait 代码中的调用，虽然在 FBG 基线中我们禁用了 MSBN，但保留接口防止报错
+        # No-op for WearGait API compatibility
         pass
 
 
 # =====================================================================
-# 🌟 2. 严格复制的 Harmony 核心算法 (100% 保持不变)
+# 2. Harmony core (unchanged)
 # =====================================================================
 class HarmonyACFM(nn.Module):
-    def __init__(self, feature_dim=64, K=3, classifier_dim=32): # 注意: FBG 分类头输入是 32 维
+    def __init__(self, feature_dim=64, K=3, classifier_dim=32):  # FBG head input dim = 32
         super().__init__()
         self.feature_dim = feature_dim
         self.K = K
@@ -126,7 +126,7 @@ class MKAM(nn.Module):
         return self.proj(x)
 
 class GatedKnowledgeAdapter(nn.Module):
-    def __init__(self, feature_dim=64, rank=8): # 保持你原来的 rank 默认参数
+    def __init__(self, feature_dim=64, rank=8):  # default rank
         super().__init__()
         self.A = nn.Linear(feature_dim, rank, bias=False)
         self.B = nn.Linear(rank, feature_dim, bias=False)
@@ -188,12 +188,12 @@ class HybridAlignmentLoss(nn.Module):
 
 
 # =====================================================================
-# 🌟 3. FBG 定制的训练循环与数据路由
+# 3. FBG training loop and routing
 # =====================================================================
 def train_harmony_task(args, model, train_loader, val_loader, mod, device, epochs, patience, task_idx):
     print(f"\n   >>> [Harmony Complete] Training '{mod}' (Task {task_idx+1}) ...")
     
-    # 动态配置各模态的专属参数 (参考你 FBG 的 MODALITY_CONFIG)
+    # Per-modality hyperparameters (see MODALITY_CONFIG)
     lr = 2e-4 if mod == 'grf' else 1e-4
     
     base_params = [p for name, p in model.named_parameters() 
@@ -216,7 +216,7 @@ def train_harmony_task(args, model, train_loader, val_loader, mod, device, epoch
         model.train()
         accum = {"loss": 0, "ce": 0, "align": 0, "correct": 0, "total": 0}
 
-        # 🌟 修改点 1：解包 FBG 的字典格式
+        # Unpack FBG dict batch
         for batch in train_loader:
             x = batch[mod].to(device)
             y = batch['label'].to(device)
@@ -259,7 +259,7 @@ def train_harmony_task(args, model, train_loader, val_loader, mod, device, epoch
             accum["correct"] += (logits.argmax(1) == y).sum().item()
             accum["total"] += y.size(0)
 
-        # --- FBG 验证逻辑 ---
+        # --- FBG validation ---
         model.eval()
         all_preds, all_targets = [], []
         with torch.no_grad():
@@ -316,7 +316,7 @@ def run_cv_harmony(args):
         train_subjects = [subjects[i] for i in train_idx]
         test_subjects = [subjects[i] for i in test_idx]
         
-        # 🌟 使用 FBG 专属大字典 Dataloader
+        # FBG multi-modality dict dataloader
         train_loader, test_loader = get_fbg_dataloaders(
             args.data_root, train_subjects, test_subjects, 
             batch_size=args.batch_size, window_size=args.window_size, step_size=args.step_size
@@ -324,7 +324,7 @@ def run_cv_harmony(args):
         
         model = HarmonyFBGModel(d_model=64, num_tasks=num_tasks).to(device)
         
-        # 动态注入 Harmony 组件
+        # Inject Harmony modules
         model.acfm = nn.ModuleDict({
             k: HarmonyACFM(feature_dim=64, K=3, classifier_dim=32).to(device) for k in model.encoders.keys()
         })
@@ -390,13 +390,13 @@ if __name__ == "__main__":
     ap.add_argument('--order', type=str, default="linear,angular,grf")
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--batch_size', type=int, default=64)
-    ap.add_argument('--epochs', type=int, default=50) # 对齐 FBG 的 70 轮
+    ap.add_argument('--epochs', type=int, default=50)  # align with FBG 70 epochs
     
-    # 🌟 强制物理时间窗对齐
+    # Sliding-window alignment
     ap.add_argument('--window_size', type=int, default=256)
     ap.add_argument('--step_size', type=int, default=64)
     
-    # Harmony 专属
+    # Harmony-specific
     ap.add_argument("--lambda_align", type=float, default=0.15)
     
     args = ap.parse_args()

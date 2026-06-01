@@ -7,7 +7,7 @@ import numpy as np
 from timm.models.vision_transformer import Block
 
 # =====================================================================
-# 🌟 1. FOG 专属 1D 分词器 (120 帧感受野)
+# 🌟 1. FOG 1D tokenizer (120-frame RF)
 # =====================================================================
 class FOG_TokenEmbedding(nn.Module):
     def __init__(self, in_channels, dim=768, max_len=120): 
@@ -27,14 +27,14 @@ class FOG_TokenEmbedding(nn.Module):
         return embeddings
 
 # =====================================================================
-# 🌟 2. FOG 专属 Unified Model
+# 🌟 2. FOG unified model
 # =====================================================================
 class FOG_Unified_Model(nn.Module):
     def __init__(self, patch_size=1, embed_dim=768, decoder_embed_dim=512, is_teacher=False):
         super().__init__()
         self.is_teacher = is_teacher
         
-        # 严格对齐 FOG 物理通道
+        # FOG channel layout
         self.patch_embed_acc = FOG_TokenEmbedding(in_channels=3, dim=embed_dim)
         self.patch_embed_gyr = FOG_TokenEmbedding(in_channels=3, dim=embed_dim)
         self.patch_embed_skel = FOG_TokenEmbedding(in_channels=21, dim=embed_dim)
@@ -55,7 +55,7 @@ class FOG_Unified_Model(nn.Module):
             ]) 
             self.decoder_norm = nn.LayerNorm(decoder_embed_dim)
             
-            # 针对不同模态通道数重建
+            # Rebuild per-modality channel width
             self.decoder_pred_acc = nn.Linear(decoder_embed_dim, 3, bias=True)
             self.decoder_pred_gyr = nn.Linear(decoder_embed_dim, 3, bias=True)
             self.decoder_pred_skel = nn.Linear(decoder_embed_dim, 21, bias=True)
@@ -149,13 +149,13 @@ class FOG_Unified_Model(nn.Module):
 
 
 # =====================================================================
-# 🌟 3. FOG 缓冲数据集 (适配列表映射)
+# 🌟 3. FOG buffer dataset (list indices)
 # =====================================================================
 # =====================================================================
-# 🌟 3. FOG 缓冲数据集 (适配列表映射)
+# 🌟 3. FOG buffer dataset (list indices)
 # =====================================================================
 class FOG_Buffer_Dataset(Dataset):
-    # 🌟 修复 1：增加 seed 和 fold 参数进行物理隔离
+    # 🌟 Fix 1: seed/fold isolation
     def __init__(self, target_modality, native_dataset, mod_order, buffer_json_dir=None, past_tasks=None, seed=42, fold=0):
         self.target_modality = target_modality
         self.native_dataset = native_dataset
@@ -166,7 +166,7 @@ class FOG_Buffer_Dataset(Dataset):
         
         if buffer_json_dir and past_tasks:
             for past_mod in past_tasks:
-                # 🌟 修复 2：读取带有隔离后缀的文件名
+                # 🌟 Fix 2: isolated buffer filenames
                 buffer_path = os.path.join(buffer_json_dir, f"{past_mod}_buffer_seed{seed}_fold{fold}.json")
                 if os.path.exists(buffer_path):
                     with open(buffer_path, 'r') as f:
@@ -192,12 +192,12 @@ class FOG_Buffer_Dataset(Dataset):
         raw_data = self.native_dataset[actual_idx]
         mod_idx = self.mod_order.index(actual_modality)
         
-        # FOGLazyDataset 返回 {"xs": [...], "y": tensor, "sid": ...}
-        # 需在获取之后剥离多余维度，恢复至 [T, C] (120 长度在前以符合 raw_x 格式)
+        # FOGLazyDataset returns {"xs": [...], "y": tensor, "sid": ...}
+        # Strip extra dims to [T, C] for raw_x
         x_tensor = raw_data['xs'][mod_idx].clone().detach().float()
         
-        # FOG 的 Tensor 已经是 [Channels, Time] (从 data_loader 看来)
-        # Unified 模型期望的是 [Time, Channels] 供 Transpose 使用，需翻转
+        # FOG tensors are [C, T] from data_loader
+        # Unified model expects [T, C]; flip if needed
         if x_tensor.size(0) in [3, 21] and x_tensor.size(1) == 120:
             x_tensor = x_tensor.transpose(0, 1)
 

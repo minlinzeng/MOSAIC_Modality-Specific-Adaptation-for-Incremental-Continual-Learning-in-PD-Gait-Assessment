@@ -6,16 +6,16 @@ from torch.utils.data import Dataset
 import numpy as np
 from timm.models.vision_transformer import Block
 
-# 依赖你原有的 FBG 数据加载逻辑
+# FBG data loading
 from data_loader import FBGIncrementalDataset
 
 # =====================================================================
-# 🌟 1. FBG 专属 1D 分词器 (替代原版的 TokenBaseEmbedding)
+# 1. FBG 1D tokenizer
 # =====================================================================
 class FBG_TokenEmbedding(nn.Module):
-    def __init__(self, in_channels, dim=768, max_len=256): # 对齐 FBG 的 256 窗口
+    def __init__(self, in_channels, dim=768, max_len=256):  # FBG window 256
         super().__init__()
-        # 严格使用 1x1 卷积作为 Tokenizer
+        # 1x1 conv tokenizer
         self.embeddings = nn.Conv1d(in_channels=in_channels, out_channels=dim, kernel_size=1, stride=1)
         self.embeddings_norm = nn.LayerNorm(dim)
         self.embeddings_pos = nn.Embedding(max_len, dim)
@@ -35,14 +35,14 @@ class FBG_TokenEmbedding(nn.Module):
         return embeddings
 
 # =====================================================================
-# 🌟 2. FBG 专属 Unified Model (支持 MAE 与 蒸馏)
+# 2. FBG unified model (MAE + distill)
 # =====================================================================
 class FBG_Unified_Model(nn.Module):
     def __init__(self, patch_size=1, embed_dim=768, decoder_embed_dim=512, is_teacher=False):
         super().__init__()
         self.is_teacher = is_teacher
         
-        # --- 独立的前端分词器 (Encoders) ---
+        # --- Per-modality encoders ---
         self.patch_embed_lin = FBG_TokenEmbedding(in_channels=137, dim=embed_dim)
         self.patch_embed_ang = FBG_TokenEmbedding(in_channels=47, dim=embed_dim)
         self.patch_embed_grf = FBG_TokenEmbedding(in_channels=8, dim=embed_dim)
@@ -54,7 +54,7 @@ class FBG_Unified_Model(nn.Module):
         ])
         self.norm = nn.LayerNorm(embed_dim)
 
-        # --- 独立的 MAE 解码器 (仅学生模型需要) ---
+        # --- MAE decoder (student only) ---
         if not self.is_teacher:
             self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
             self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
@@ -64,7 +64,7 @@ class FBG_Unified_Model(nn.Module):
             ]) 
             self.decoder_norm = nn.LayerNorm(decoder_embed_dim)
             
-            # 针对不同模态通道数重建
+            # Reconstruct per-modality channels
             self.decoder_pred_lin = nn.Linear(decoder_embed_dim, 137, bias=True)
             self.decoder_pred_ang = nn.Linear(decoder_embed_dim, 47, bias=True)
             self.decoder_pred_grf = nn.Linear(decoder_embed_dim, 8, bias=True)
@@ -142,7 +142,7 @@ class FBG_Unified_Model(nn.Module):
         
         x, mask, ids_restore, generated_noise = self.random_masking(x, mask_ratio, noise)
 
-        # 插入 CLS Token
+        # Prepend CLS token
         cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
@@ -153,10 +153,10 @@ class FBG_Unified_Model(nn.Module):
         if feature or self.is_teacher:
             return x, generated_noise
 
-        pred = self.forward_decoder(x, modality, ids_restore) # pred 形状是 [B, T, C]
+        pred = self.forward_decoder(x, modality, ids_restore)  # [B, T, C]
         
-        # 🌟 修复 2: MAE 重建损失的对齐
-        # raw_x 本身就是 [B, T, C]，解码器输出的 pred 也是 [B, T, C]，不需要转置！
+        # MAE reconstruction loss alignment
+        # raw_x and pred are both [B, T, C]; no transpose
         target = raw_x 
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)
@@ -166,7 +166,7 @@ class FBG_Unified_Model(nn.Module):
 
 
 # =====================================================================
-# 🌟 3. FBG 经验回放缓冲数据集 (Buffer Dataset)
+# 3. FBG replay buffer dataset
 # =====================================================================
 class FBG_Buffer_Dataset(Dataset):
     def __init__(self, target_modality, native_dataset, buffer_json_dir=None, past_tasks=None, seed=42, fold=0):
@@ -178,7 +178,7 @@ class FBG_Buffer_Dataset(Dataset):
         
         if buffer_json_dir and past_tasks:
             for past_mod in past_tasks:
-                # 🌟 修复 1：严格匹配带有 seed 和 fold 的物理隔离文件
+                # Match buffer JSON with seed and fold
                 buffer_path = os.path.join(buffer_json_dir, f"{past_mod}_buffer_seed{seed}_fold{fold}.json")
                 if os.path.exists(buffer_path):
                     with open(buffer_path, 'r') as f:
@@ -195,19 +195,19 @@ class FBG_Buffer_Dataset(Dataset):
         is_buffer = idx >= len(self.native_dataset)
         
         if is_buffer:
-            # 读取历史任务数据
+            # Past-task buffer samples
             buffer_idx = idx - len(self.native_dataset)
             actual_modality = self.buffer_modalities[buffer_idx]
             actual_idx = self.buffer_indices[buffer_idx]
         else:
-            # 读取当前任务数据
+            # Current-task native samples
             actual_modality = self.target_modality
             actual_idx = idx
 
-        # 从底层读取原始字典
+        # Read native dict batch
         raw_data = self.native_dataset[actual_idx]
         
-        # 提取目标模态的张量
+        # Extract target modality tensor
         x_tensor = raw_data[actual_modality].clone().detach().float()
         
         return {

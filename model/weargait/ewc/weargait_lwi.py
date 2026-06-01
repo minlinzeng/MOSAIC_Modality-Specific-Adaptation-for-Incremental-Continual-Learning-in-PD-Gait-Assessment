@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score
 from pathlib import Path
 
-# --- 导入 WearGait 核心组件 ---
+# --- WearGait core imports ---
 from model.weargait.ewc.config import Config
 import model.weargait.ewc.utility as U
 from model.weargait.ewc.data_loader import (
@@ -19,11 +19,11 @@ from model.weargait.ewc.data_loader import (
 )
 from model.weargait.ewc.encoder import WearGaitUniversal
 
-# 导入 LwI 最优传输模块 (确保路径对齐你的项目结构)
+# LwI optimal-transport module import (project path alignment)
 from model.baselines.LwI import optimal_transport as ot
 
 # ==========================================
-# LwI 配置与工具函数
+# LwI config and utilities
 # ==========================================
 class OTConfig:
     def __init__(self, args, device):
@@ -51,7 +51,7 @@ class OTConfig:
 
 def recalibrate_bn(model, loader, device, mod, task_idx):
     """
-    权重经过 OT 融合后，必须使用当前新模态数据重新校准 Shared BN 的统计量。
+    After OT fusion, recalibrate shared BN statistics on the current modality.
     """
     model.train()
     model.set_active_modality(mod)
@@ -72,7 +72,7 @@ def recalibrate_bn(model, loader, device, mod, task_idx):
     print("   ✅ [LwI] Recalibration Complete.")
 
 # ==========================================
-# 核心训练逻辑 (包含 Chimera KD)
+# Core training loop (with Chimera KD)
 # ==========================================
 def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_id, device):
     print(f"\n   >>> [LwI] Training '{mod.upper()}' (Task {task_id}) | Feat KD $\lambda$: {args.kd_lambda}")
@@ -89,7 +89,7 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
             model_old.set_active_task(task_id - 1)
         for p in model_old.parameters(): p.requires_grad = False
 
-    # 仅开启当前模态的前端编码器，冻结其他历史模态前端
+    # Train current encoder only; freeze historical encoders
     for k in model.encoders.keys():
         for p in model.encoders[k].parameters():
             p.requires_grad = (k == mod)
@@ -103,7 +103,7 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
     mse_loss = nn.MSELoss()
     best_eval = 0.0
 
-    # LwI Warmup 设定 (前 5 个 Epoch 冻结共享层，只适应 Encoder)
+    # LwI warmup: first 5 epochs freeze shared layers, adapt encoder only
     WARMUP_EPOCHS = 5
 
     for ep in range(1, args.epochs + 1):
@@ -125,7 +125,7 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
             
-            # 前向传播提取表征
+            # Forward pass for representations
             z_encoder = model.encoders[mod](x)
             z_new = model.shared_backbone(z_encoder)
             logits_new = model.shared_head(z_new)
@@ -134,13 +134,13 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
             loss = loss_ce
             loss_kd_val = torch.tensor(0.0)
 
-            # LwI 特征级 KD (Chimera Distillation)
+            # LwI feature-level KD (Chimera distillation)
             if model_old is not None and current_lambda > 0:
                 with torch.no_grad():
                     z_old_enc = model_old.encoders[mod](x)
                     z_old = model_old.shared_backbone(z_old_enc)
                 
-                # 严格 L2 归一化特征
+                # Strict L2 feature normalization
                 z_new_norm = F.normalize(z_new, p=2, dim=1)
                 z_old_norm = F.normalize(z_old, p=2, dim=1)
                 
@@ -158,7 +158,7 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
             accum["correct"] += (logits_new.argmax(dim=1) == y).sum().item()
             accum["total"] += y.size(0)
 
-        # 验证评估
+        # Validation
         model.eval()
         all_preds, all_targets = [], []
         with torch.no_grad():
@@ -188,7 +188,7 @@ def train_lwi_task(args, model, model_old, train_loader, val_loader, mod, task_i
         model.load_state_dict(early_stopper.best_model_state)
 
 # ==========================================
-# 工具函数: WearGait 数据划分
+# WearGait data split utilities
 # ==========================================
 def _scan_subjects(dir_path: Path):
     return sorted({x.name.split("_")[0].lower() for x in dir_path.glob(Config.CSV_PATTERN)})
@@ -197,14 +197,14 @@ def init_subjects_and_folds(args):
     pd_ids, hc_ids = _scan_subjects(Config.PD_PATH), _scan_subjects(Config.HC_PATH)
     if not pd_ids or not hc_ids: raise ValueError("No subjects found.")
     
-    # 借助 data_loader.py 暴露的方法创建 Folds
+    # Build folds via data_loader helpers
     from model.weargait.ewc.data_loader import make_fixed_balanced_folds_no_overlap
     subj2label = build_subj2label(pd_ids, hc_ids)
     folds = make_fixed_balanced_folds_no_overlap(pd_ids, hc_ids, n_folds=args.n_folds, seed=args.seed)
     return subj2label, folds
 
 # ==========================================
-# 主控与交叉验证 (Cross Validation & OT Fusion)
+# Main CV loop with OT fusion
 # ==========================================
 def main():
     parser = argparse.ArgumentParser(description="WearGait LwI Baseline Execution Script")
@@ -221,7 +221,7 @@ def main():
     parser.add_argument('--num_classes', type=int, default=2)
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to run on (e.g., cuda:0)")
     
-    # 🚨 WearGait 核心降级开关 
+    # 🚨 WearGait DBN disable flag 
     parser.add_argument("--disable_dbn", action='store_true', help="Force network to drop DBN and downgrade to Shared BN")
 
     # LwI (OT) Specific Arguments
@@ -232,7 +232,7 @@ def main():
     
     args = parser.parse_args()
     
-    # 强制物理降级为传统的 Shared BN，防止提取私有化统计红利
+    # Force shared BN (disable DBN) for fair comparison
     args.disable_dbn = True
 
     U.set_seed(args.seed)
@@ -260,7 +260,7 @@ def main():
         model_old = None
 
         for task_idx, active_mod in enumerate(tasks):
-            # 加载当前模态数据
+            # Load current modality
             prep = prepare_split(train_subs, test_subs, data_cache=global_cache, win=args.win_len, hop=args.hop_len, modalities=(active_mod,))
             tr_sync, te_sync = make_sync_loaders(prep, subj2label, batch_size=args.batch_size, num_workers=args.num_workers)
             
@@ -268,13 +268,13 @@ def main():
             te_loader = DataLoader(U.SingleModalityDataset(te_sync.dataset, mod_index=0), batch_size=args.batch_size, shuffle=False, num_workers=0)
             eval_loader_cache[fold][active_mod] = te_loader 
             
-            # 1. 训练当前增量任务
+            # 1. Train incremental task
             train_lwi_task(args, model, model_old, tr_loader, te_loader, active_mod, task_idx, device)
 
-            # 2. 执行 OT 权重拓扑融合
+            # 2. OT weight fusion
             if model_old is not None:
                 print("\n   🧬 [LwI] Performing Optimal Transport (OT) Weight Fusion...")
-                # 🚨 WearGait 中私有前端保存在 ModuleDict 'encoders' 中
+                # 🚨 Private encoders live in ModuleDict 'encoders'
                 fused_dict = ot.get_wassersteinized_layers_modularized(
                     ot_config, device, networks=[model_old, model], ignore_keyword='encoders'
                 )
@@ -285,12 +285,12 @@ def main():
                         current_state[layer_name].copy_(new_weight)
                 model.load_state_dict(current_state)
                 
-                # 3. 重新校准 Shared BN
+                # 3. Recalibrate shared BN
                 recalibrate_bn(model, tr_loader, device, active_mod, task_idx)
 
             model_old = copy.deepcopy(model)
 
-            # 4. 增量矩阵 R 计算
+            # 4. Incremental matrix R evaluation
             print(f"   [EVAL] Sequential Backward Testing...")
             for j in range(task_idx + 1):
                 eval_mod = tasks[j]

@@ -5,19 +5,19 @@ from queue import Queue
 from threading import Thread
 
 # =====================================================================
-# 🎛️ 物理约束与实验超参数矩阵
+# 🎛️ Physics constraints and hyperparameter grid
 # =====================================================================
 SCRIPT_NAME = "fog_train.py"
 LOG_DIR = "./log/spec"
 CSV_DIR = "./log/spec/csv"
-AVAILABLE_GPUS = [0, 1]            # 挂载的目标物理 GPU
-MAX_PER_GPU = 15                    # 单卡算力锁死，严禁显存踩踏
+AVAILABLE_GPUS = [0, 1]            # Target GPU IDs
+MAX_PER_GPU = 15                    # Max concurrent jobs per GPU
 
 SEEDS = [3, 4, 42, 43, 44]
 MODALITIES = ["acc", "gyr", "skeleton"]
 
 # =====================================================================
-# ⚙️ 核心调度引擎 (Producer-Consumer Topology)
+# ⚙️ Scheduler (producer-consumer)
 # =====================================================================
 def worker(gpu_id, task_queue):
     while not task_queue.empty():
@@ -35,16 +35,16 @@ def worker(gpu_id, task_queue):
         log_file = os.path.join(LOG_DIR, f"specialist_{mod}_seed{seed}.log")
         csv_path = os.path.join(CSV_DIR, f"specialist_{mod}_seed{seed}.csv")
         
-        # 🚨 核心映射：严格适配 fog_train.py 的超参数签名
+        # 🚨 Map to fog_train.py CLI args
         cmd = [
             "python", "-u", SCRIPT_NAME,
             "--seed", str(seed),
-            "--order", mod,              # 强制降维：仅投喂单一物理源，切断 CL 任务流
-            "--disable_dbn",             # 剥离多任务域归一化，锁定单一分布参数
-            "--epochs", "50",           # 覆盖默认 80 轮限制，探明极限收敛点
-            "--batch_size", "32",        # 对齐默认张量体积，防止 OOM
-            "--num_workers", "2",        # 压制 CPU 调度器线程暴增
-            "--csv_log", csv_path        # 挂载独立数据遥测日志
+            "--order", mod,              # Single-modality oracle (no CL stream)
+            "--disable_dbn",             # Disable DBN for single distribution
+            "--epochs", "50",           # Override default 80 epochs
+            "--batch_size", "32",        # Default batch size to avoid OOM
+            "--num_workers", "2",        # Limit DataLoader workers
+            "--csv_log", csv_path        # Per-run CSV log path
         ]
         
         env = os.environ.copy()

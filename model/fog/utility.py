@@ -132,35 +132,35 @@ def evaluate_classification(model, loader, device, metric='f1_macro'):
 
 def compute_modality_analysis(features_A, features_B, target_dim=None):
     """
-    严格基于经典文献的 Modality Gap & Variance Shift 计算工具
-    - Gap 基于: Liang et al., NeurIPS 2022
-    - Variance 基于: Li et al., ICLR 2017
+    Modality gap and variance shift (literature-based)
+    - Gap from: Liang et al., NeurIPS 2022
+    - Variance from: Li et al., ICLR 2017
     """
-    # 确保没有梯度追踪干扰
+    # No grad tracking
     features_A = features_A.detach()
     features_B = features_B.detach()
     
     # ==========================================
-    # 1. 方差比例计算 (Variance Shift)
+    # 1. Variance shift ratio
     # ==========================================
-    # dim=0 计算通道级别在 Batch 上的分布方差，对应 BN 的统计维度
+    # Channel variance over batch (BN stats)
     var_A = features_A.var(dim=0).mean().item()
     var_B = features_B.var(dim=0).mean().item()
     var_ratio = var_B / var_A if var_A != 0 else 0
 
     # ==========================================
-    # 2. 模态鸿沟计算 (Modality Gap)
+    # 2. Modality gap
     # ==========================================
     
-    # a. 特征 L2 归一化 (将其投射到半径为 1 的超球面上，消除尺度影响)
+    # L2-normalize to unit sphere
     norm_A = F.normalize(features_A, p=2, dim=1)
     norm_B = F.normalize(features_B, p=2, dim=1)
     
-    # b. 计算两个模态流形的质心 (Centroid)
+    # Per-modality centroids
     centroid_A = norm_A.mean(dim=0)
     centroid_B = norm_B.mean(dim=0)
     
-    # c. 计算质心之间的欧氏距离 (Euclidean Distance)
+    # Centroid Euclidean distance
     delta_gap = torch.norm(centroid_A - centroid_B, p=2).item()
         
     return delta_gap, var_ratio
@@ -206,7 +206,7 @@ def log_training_curves_to_csv(csv_path, fold_idx, mod, ep, avg_metrics, alpha, 
         if write_header:
             writer.writerow(['Fold', 'Task', 'Epoch', 'Total_Loss', 'CE_Loss', 'EWC_Loss', 'KD_Loss', 'Repul_Loss', 'Alpha', 'Lambda', 'Val_F1'])
         
-        # 🚨 极客级容错写法：优先获取加权值 (w_)，没有则回退原始值 (raw_)，再没有则为 0.0
+        # 🚨 Prefer weighted metrics (w_), else raw_, else 0
         loss_val = avg_metrics.get('loss', 0.0)
         ce_val = avg_metrics.get('raw_ce', 0.0)
         ewc_val = avg_metrics.get('w_ewc', avg_metrics.get('raw_ewc', 0.0))
@@ -264,7 +264,7 @@ def analyze_fisher_cosine_similarity(ewc_instance, task_A=0, task_B=1):
 
     if count == 0: return 0.0
     avg_sim = total_sim / count
-    # 🚨 核心修复：修改打印格式以匹配 extraction.py 的正则捕获组
+    # 🚨 Fix print format for extraction.py regex
     print(f"   📊 Latent Crowding {task_A} vs {task_B}: {avg_sim:.4f}")
     return avg_sim
 

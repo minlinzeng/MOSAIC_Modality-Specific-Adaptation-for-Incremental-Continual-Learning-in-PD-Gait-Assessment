@@ -5,16 +5,16 @@ import argparse
 
 from model.paths import FBG_PROCESSED, as_str
 
-# ================= 1. 环境与硬件配置 =================
+# ================= 1. Environment and hardware =================
 LOG_BASE = "./log/fbg_baselines"
 SEEDS = [42, 43, 44, 3, 4]  
 
-# ================= 2. FBG 基础最优超参数 =================
-# 严格对齐 fbg_cl_train.py 与 fbg_lwi.py 的工程接口
+# ================= 2. FBG default hyperparameters =================
+# Aligned with fbg_cl_train.py and fbg_lwi.py CLI interface
 BASE_ARGS = {
     "--data_root": as_str(FBG_PROCESSED),
     "--order": "linear,angular,grf", 
-    "--disable_msbn": "",           # 🚨 物理剥离 MSBN，降级为 Shared BN 基线
+    "--disable_msbn": "",           # Strip MSBN; use shared BN baseline
     "--batch_size": "64",   
     "--lr": "0.0001",       
     "--epochs": "70",       
@@ -23,21 +23,21 @@ BASE_ARGS = {
     "--d_model": "64"
 }
 
-# ================= 3. 基线架构注册表 =================
+# ================= 3. Baseline registry =================
 BASELINES = [
-    {"name": "LwI", "script": "fbg_lwi.py"}  # Index 1: 最优传输权重融合基线
+    {"name": "LwI", "script": "fbg_lwi.py"}  # Index 1: optimal-transport weight fusion baseline
 ]
 
 def build_command(script_path, seed, gpu_id):
     cmd = ["python", "-u", script_path]
     merged = BASE_ARGS.copy()
     merged["--seed"] = str(seed)
-    # 动态分配 GPU 硬件路由
+    # Dynamic GPU routing
     merged["--device"] = f"cuda:{gpu_id}" if torch_has_gpu else "cpu"
     
-    # 针对 PyTorch CUDA 环境的硬兼容
+    # PyTorch CUDA compatibility: use env var instead of --device
     if "cuda" in merged["--device"]:
-        # 移除 --device 键，直接通过环境变量注入，防止某些 argparse 报错
+        # Drop --device; inject GPU via CUDA_VISIBLE_DEVICES
         gpu_str = merged.pop("--device").split(":")[-1]
         os.environ["CUDA_VISIBLE_DEVICES"] = gpu_str
     else:
@@ -57,7 +57,7 @@ def run_suite(target_runs=None, gpus=[0, 1]):
     experiments = [BASELINES[i-1] for i in target_runs if 0 < i <= len(BASELINES)] if target_runs else BASELINES
     if not experiments: return
 
-    # 5折交叉验证本身开销较大，限制单卡最大并发任务数，防止 CPU 线程级锁死
+    # 5-fold CV is heavy; cap parallel jobs per GPU to avoid CPU thread contention
     current_max_parallel = len(gpus) * 15
 
     print(f"🚀 Starting FBG Baselines Suite: {len(experiments)} architectures x {len(SEEDS)} seeds.")
@@ -73,7 +73,7 @@ def run_suite(target_runs=None, gpus=[0, 1]):
         os.makedirs(exp_dir, exist_ok=True)
         
         for seed in SEEDS:
-            # 严格控制 GPU 进程池水位
+            # Cap active GPU worker pool
             while len(active_processes) >= current_max_parallel:
                 active_processes = [p for p in active_processes if p.poll() is None]
                 time.sleep(2) 
@@ -88,7 +88,7 @@ def run_suite(target_runs=None, gpus=[0, 1]):
             
             global_counter += 1
             print(f"   🔥 [Spawned] {exp_name} | Seed {seed} assigned to GPU {gpu_id} -> Log: {log_file}")
-            time.sleep(5.0) # 错峰启动，防止同时加载数据集引发 RAM 瞬间被撑爆
+            time.sleep(5.0) # Stagger launches to avoid RAM spikes from concurrent data loads
 
     for p in active_processes: p.wait()
     print("✅ FOG/FBG Baselines Suite Successfully Completed!")
