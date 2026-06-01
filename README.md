@@ -101,7 +101,7 @@ data/weargait/
 
 Preprocessing is handled inside the training pipeline via `model/weargait/ewc/preprocessing.py` and `config.py` (30 Hz windows, 4 s / 120 frames).
 
-### FoG (Freezing of Gait)
+### FoG
 
 ```
 data/fog/
@@ -269,7 +269,7 @@ If you use this code, please cite our paper (details to be added upon publicatio
 @article{yourname2026jbhi,
   title   = {TBD},
   author  = {TBD},
-  journal = {IEEE Journal of Biomedical and Health Informatics},
+  journal = {TBD},
   year    = {2026}
 }
 ```
