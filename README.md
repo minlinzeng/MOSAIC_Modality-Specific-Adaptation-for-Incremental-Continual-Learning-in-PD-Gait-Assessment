@@ -251,7 +251,7 @@ Default modality order: `linear,angular,grf`. Point `--data_root` to your `Proce
 
 1. Install dependencies and place datasets as described above.
 2. Fix all paths in `config.py` and runner `LOG_BASE` / `SCRIPT_DIR` variables.
-3. Run orchestrators with the same seeds as in the paper (default: `2, 3, 42, 43, 44` for WearGait; `42, 43, 44, 2, 3` for FoG).
+3. Run orchestrators with the same seeds as in the paper (default: `2, 3, 42, 43, 44`).
 4. Aggregate logs with helper scripts under `model/weargait/ewc/log/` (e.g. `extraction.py`, `sum.py`) or `model/fog/extract_metrics.py`.
 
 For long jobs on a server:
@@ -267,11 +267,11 @@ nohup python -u run_ablations.py -r 1 2 3 4 5 -g 0 1 > log_core.out 2>&1 &
 If you use this code, please cite our paper (details to be added upon publication):
 
 ```bibtex
-@article{yourname2026jbhi,
+@article{TBD,
   title   = {TBD},
   author  = {TBD},
   journal = {TBD},
-  year    = {2026}
+  year    = {TBD}
 }
 ```
 
