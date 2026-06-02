@@ -3,7 +3,7 @@
 
 Official PyTorch implementation for continual learning experiments on three multimodal benchmarks:
 
-| Dataset | Task | Modalities (arrival order) | Main script |
+| Dataset | Task | Modalities (example arrival order) | Main script |
 |---------|------|---------------------------|-------------|
 | **WearGait** | HC vs. PD (binary) | `walkway` → `imu` → `insole` | `model/weargait/ewc/weargait_train2.py` |
 | **FoG** | H&Y stage (3-class) | `skeleton` → `gyr` → `acc` | `model/fog/fog_train.py` |
