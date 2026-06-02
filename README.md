@@ -1,4 +1,5 @@
-# JBHI26 — Multimodal Continual Learning for Gait & Movement Analysis
+# MOSAIC - Modality Specific Adaptation for Incremental Continual Learning in PD Gait Assessment
+
 
 Official PyTorch implementation for continual learning experiments on three multimodal benchmarks:
 
